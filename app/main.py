@@ -11,10 +11,14 @@ import sqlite3
 import threading
 import time
 import uuid
+import zipfile
+from io import BytesIO
+from tempfile import SpooledTemporaryFile
 from typing import Literal
+from PIL import ImageOps
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, Response, UploadFile
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 from starlette.concurrency import run_in_threadpool
@@ -43,7 +47,20 @@ class Credentials(BaseModel):
         return value
 
 
+class ProfileInput(BaseModel):
+    nickname: str = Field(max_length=30)
+
+    @field_validator('nickname')
+    @classmethod
+    def clean_nickname(cls, value):
+        value = value.strip()
+        if any(ord(c) < 32 for c in value):
+            raise ValueError('昵称不能包含控制字符')
+        return value
+
+
 class AlbumInput(BaseModel):
+    parent_id: str | None = None
     name: str = Field(min_length=1, max_length=80)
 
     @field_validator('name')
@@ -73,7 +90,15 @@ class UserState(BaseModel):
     active: bool
 
 
+class AlbumPatch(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=80)
+    parent_id: str | None = None
+    cover_id: str | None = None
+
+
 class PhotoPatch(BaseModel):
+    story: str | None = Field(default=None, max_length=4000)
+    taken_at: date | None = None
     name: str | None = Field(default=None, min_length=1, max_length=200)
     favorite: bool | None = None
     album_id: str | None = None
@@ -96,6 +121,10 @@ class PhotoPatch(BaseModel):
         if value is not None and not value.strip():
             raise ValueError('名称不能为空')
         return value.strip() if value else value
+
+
+class PhotoDownload(BaseModel):
+    photo_ids: list[str] = Field(min_length=1, max_length=500)
 
 
 def password_hash(password, salt=None):
@@ -177,7 +206,7 @@ def create_app(data_dir=None, encoder=None, start_worker=True):
         response.headers['X-Content-Type-Options'] = 'nosniff'
         response.headers['Referrer-Policy'] = 'same-origin'
         if request.url.path not in {'/docs', '/redoc'}:
-            response.headers['Content-Security-Policy'] = "default-src 'self'; img-src 'self' blob:; style-src 'self'; script-src 'self'; object-src 'none'; frame-ancestors 'none'"
+            response.headers['Content-Security-Policy'] = "default-src 'self'; img-src 'self' blob:; media-src 'self'; style-src 'self'; script-src 'self'; object-src 'none'; frame-ancestors 'none'"
         if request.url.path.startswith('/api/'):
             response.headers['Cache-Control'] = 'no-store'
         return response
@@ -190,7 +219,7 @@ def create_app(data_dir=None, encoder=None, start_worker=True):
     def current_user(request: Request):
         token = request.cookies.get(COOKIE, '')
         with database.connect() as db:
-            row = db.execute('''SELECT u.id,u.username,u.is_admin FROM users u JOIN sessions s ON u.id=s.user_id
+            row = db.execute('''SELECT u.id,u.username,u.is_admin,u.nickname,u.avatar_version,u.created_at FROM users u JOIN sessions s ON u.id=s.user_id
                 WHERE s.token_hash=? AND s.expires_at>? AND u.active=1''', (token_hash(token), time.time())).fetchone()
         if row is None:
             raise HTTPException(401, '请先登录')
@@ -247,7 +276,7 @@ def create_app(data_dir=None, encoder=None, start_worker=True):
         with database.connect() as db:
             login_session(db, response, user['id'], request.cookies.get(COOKIE, ''))
         LOG.info('action=login user=%s', user['id'])
-        return {'id': user['id'], 'username': user['username'], 'is_admin': bool(user['is_admin'])}
+        return {key: user[key] for key in ('id', 'username', 'is_admin', 'nickname', 'avatar_version', 'created_at')}
 
     @app.post('/api/auth/login')
     def login(body: Credentials, request: Request, response: Response):
@@ -270,6 +299,35 @@ def create_app(data_dir=None, encoder=None, start_worker=True):
         response.delete_cookie(COOKIE)
         LOG.info('action=change_password user=%s rows=1', user['id'])
         return {'ok': True}
+
+    @app.patch('/api/auth/profile')
+    def update_profile(body: ProfileInput, user=Depends(current_user)):
+        with database.connect() as db:
+            db.execute('UPDATE users SET nickname=? WHERE id=?', (body.nickname, user['id']))
+        return {**user, 'nickname': body.nickname}
+
+    @app.post('/api/auth/avatar')
+    def upload_avatar(file: UploadFile = File(...), user=Depends(current_user)):
+        content = file.file.read(5 * 1024 * 1024 + 1)
+        if len(content) > 5 * 1024 * 1024:
+            raise HTTPException(413, '头像不得超过 5 MiB')
+        picture, *_ = decode_image(content)
+        picture = ImageOps.fit(picture.convert('RGB'), (256, 256))
+        output = BytesIO()
+        picture.save(output, format='JPEG', quality=90)
+        version = uuid.uuid4().hex
+        with database.connect() as db:
+            db.execute('UPDATE users SET avatar=?,avatar_version=? WHERE id=?',
+                       (output.getvalue(), version, user['id']))
+        return {**user, 'avatar_version': version}
+
+    @app.get('/api/auth/avatar')
+    def get_avatar(user=Depends(current_user)):
+        with database.connect() as db:
+            avatar = db.execute('SELECT avatar FROM users WHERE id=?', (user['id'],)).fetchone()[0]
+        if avatar is None:
+            raise HTTPException(404, '尚未设置头像')
+        return Response(content=avatar, media_type='image/jpeg')
 
     @app.post('/api/auth/logout')
     def logout(request: Request, response: Response):
@@ -359,7 +417,8 @@ def create_app(data_dir=None, encoder=None, start_worker=True):
         album_id = uuid.uuid4().hex
         try:
             with database.connect() as db:
-                db.execute('INSERT INTO albums VALUES (?,?,?)', (album_id, user['id'], body.name))
+                check_album(db, body.parent_id, user['id'])
+                db.execute('INSERT INTO albums (id,owner_id,name,parent_id) VALUES (?,?,?,?)', (album_id, user['id'], body.name, body.parent_id))
         except sqlite3.IntegrityError:
             raise HTTPException(409, '同名相册已存在')
         return {'id': album_id, 'name': body.name, 'count': 0}
@@ -367,15 +426,90 @@ def create_app(data_dir=None, encoder=None, start_worker=True):
     @app.get('/api/albums')
     def albums(user=Depends(current_user)):
         with database.connect() as db:
-            return [dict(r) for r in db.execute('''SELECT a.id,a.name,count(p.id) count FROM albums a
-                LEFT JOIN photos p ON p.album_id=a.id AND p.status!='deleting'
-                WHERE a.owner_id=? GROUP BY a.id ORDER BY a.name''', (user['id'],))]
+            result = []
+            for row in db.execute('''SELECT a.id,a.name,a.parent_id,a.cover_id,count(p.id) count FROM albums a
+                LEFT JOIN photos p ON p.album_id=a.id AND p.status!='deleting' AND p.trashed_at IS NULL
+                WHERE a.owner_id=? GROUP BY a.id ORDER BY a.name''', (user['id'],)):
+                item = dict(row)
+                item['previews'] = [p[0] for p in db.execute('''SELECT id FROM photos WHERE album_id=?
+                    AND owner_id=? AND trashed_at IS NULL AND status!='deleting'
+                    ORDER BY (id=?) DESC,created_at DESC LIMIT 3''', (row['id'], user['id'], row['cover_id']))]
+                result.append(item)
+            return result
+
+    @app.patch('/api/albums/{album_id}')
+    def edit_album(album_id: str, body: AlbumPatch, user=Depends(current_user)):
+        fields = body.model_dump(exclude_unset=True)
+        with database.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            check_album(db, album_id, user['id'])
+            if 'parent_id' in fields:
+                check_album(db, fields['parent_id'], user['id'])
+                ancestor = fields['parent_id']
+                visited = {album_id}
+                while ancestor:
+                    if ancestor in visited:
+                        raise HTTPException(409, '不能把文件夹移入自身或其子文件夹')
+                    visited.add(ancestor)
+                    ancestor = db.execute('SELECT parent_id FROM albums WHERE id=?', (ancestor,)).fetchone()[0]
+            if fields.get('cover_id'):
+                photo = owned(db, fields['cover_id'], user['id'])
+                if photo['album_id'] != album_id or photo['trashed_at']:
+                    raise HTTPException(409, '封面须选择此文件夹内的有效照片')
+            if 'name' in fields:
+                if not fields['name'] or not fields['name'].strip():
+                    raise HTTPException(422, '文件夹名称不能为空')
+                fields['name'] = fields['name'].strip()
+            try:
+                for key, value in fields.items():
+                    db.execute(f'UPDATE albums SET {key}=? WHERE id=?', (value, album_id))
+            except sqlite3.IntegrityError:
+                raise HTTPException(409, '同名文件夹已存在')
+        return {'ok': True}
+
+    @app.delete('/api/albums/{album_id}')
+    def remove_album(album_id: str, user=Depends(current_user)):
+        with database.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            check_album(db, album_id, user['id'])
+            parent = db.execute('SELECT parent_id FROM albums WHERE id=?', (album_id,)).fetchone()[0]
+            db.execute('UPDATE photos SET album_id=NULL WHERE album_id=? AND owner_id=?', (album_id, user['id']))
+            db.execute('UPDATE albums SET parent_id=? WHERE parent_id=? AND owner_id=?', (parent, album_id, user['id']))
+            db.execute('DELETE FROM albums WHERE id=? AND owner_id=?', (album_id, user['id']))
+        return {'ok': True}
+
+    @app.get('/api/memories/random')
+    def random_memory(exclude: str = '', user=Depends(current_user)):
+        with database.connect() as db:
+            row = db.execute("""SELECT * FROM photos WHERE owner_id=? AND trashed_at IS NULL
+                AND status!='deleting' ORDER BY (id=?) ASC,random() LIMIT 1""", (user['id'], exclude)).fetchone()
+            if row is None:
+                raise HTTPException(404, '还没有可以拾起的回忆，先收藏一些照片吧')
+            return photo_dict(db, row)
+
+    @app.post('/api/photos/{photo_id}/restore')
+    def restore_photo(photo_id: str, user=Depends(current_user)):
+        with database.connect() as db:
+            owned(db, photo_id, user['id'])
+            db.execute('UPDATE photos SET trashed_at=NULL WHERE id=? AND owner_id=?', (photo_id, user['id']))
+        return {'ok': True}
+
+    @app.delete('/api/photos/{photo_id}/permanent', status_code=202)
+    def purge_photo(photo_id: str, user=Depends(current_user)):
+        with database.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row = owned(db, photo_id, user['id'])
+            if not row['trashed_at']:
+                raise HTTPException(409, '请先将照片移入回收站')
+            db.execute("UPDATE photos SET status='deleting',embedding=NULL WHERE id=?", (photo_id,))
+        worker.wake.set()
+        return {'ok': True}
 
     @app.get('/api/tags')
     def tags(user=Depends(current_user)):
         with database.connect() as db:
             return [dict(r) for r in db.execute('''SELECT t.name,count(*) count FROM photo_tags t
-                JOIN photos p ON p.id=t.photo_id WHERE p.owner_id=? AND p.status!='deleting'
+                JOIN photos p ON p.id=t.photo_id WHERE p.owner_id=? AND p.status!='deleting' AND p.trashed_at IS NULL
                 GROUP BY t.name ORDER BY count DESC,t.name''', (user['id'],))]
 
     @app.post('/api/photos', status_code=201)
@@ -388,13 +522,13 @@ def create_app(data_dir=None, encoder=None, start_worker=True):
 
     @app.get('/api/photos')
     def list_photos(tag: str = '', album_id: str = '', favorite: bool = False, location: str = '',
-                    tags: list[str] = Query(default=[], max_length=30),
+                    tags: list[str] = Query(default=[], max_length=30), trash: bool = False,
                     start: date | None = None, end: date | None = None,
                     page: int = Query(1, ge=1), page_size: int = Query(40, ge=1, le=100),
                     order: str = Query('newest', pattern='^(newest|oldest)$'), user=Depends(current_user)):
         if start and end and start > end:
             raise HTTPException(422, '开始日期不能晚于结束日期')
-        where, values = filters(user['id'], tag, album_id, favorite, location, start, end, tags=tags)
+        where, values = filters(user['id'], tag, album_id, favorite, location, start, end, tags=tags, trash=trash)
         with database.connect() as db:
             total = db.execute(f'SELECT count(*) FROM photos p WHERE {where}', values).fetchone()[0]
             direction = 'DESC' if order == 'newest' else 'ASC'
@@ -402,6 +536,39 @@ def create_app(data_dir=None, encoder=None, start_worker=True):
                 ORDER BY COALESCE(p.taken_at,p.created_at) {direction},p.id LIMIT ? OFFSET ?''',
                 [*values, page_size, (page - 1) * page_size]).fetchall()
             return {'items': [photo_dict(db, r) for r in rows], 'total': total, 'page': page}
+
+    @app.post('/api/photos/download')
+    def download_photos(body: PhotoDownload, user=Depends(current_user)):
+        photo_ids = list(dict.fromkeys(body.photo_ids))
+        with database.connect() as db:
+            rows = db.execute(f'''SELECT id,name FROM photos WHERE owner_id=? AND status!='deleting'
+                AND id IN ({','.join('?' for _ in photo_ids)})''', [user['id'], *photo_ids]).fetchall()
+        photos = {row['id']: row for row in rows}
+        if len(photos) != len(photo_ids):
+            raise HTTPException(404, '部分照片不存在或不可下载')
+        archive = SpooledTemporaryFile(max_size=32 * 1024 * 1024, mode='w+b')
+        try:
+            with zipfile.ZipFile(archive, 'w', compression=zipfile.ZIP_DEFLATED) as bundle:
+                for photo_id in photo_ids:
+                    path = database.original(photo_id)
+                    if not path.is_file():
+                        raise HTTPException(404, '部分照片文件暂不可用')
+                    name = Path(photos[photo_id]['name']).name or '照片'
+                    bundle.write(path, f'{photo_id[:8]}_{name}')
+            archive.seek(0)
+        except Exception:
+            archive.close()
+            raise
+
+        def stream_archive():
+            try:
+                while chunk := archive.read(1024 * 1024):
+                    yield chunk
+            finally:
+                archive.close()
+
+        return StreamingResponse(stream_archive(), media_type='application/zip',
+                                 headers={'Content-Disposition': 'attachment; filename="aibum-photos.zip"'})
 
     @app.get('/api/photos/{photo_id}')
     def get_photo(photo_id: str, user=Depends(current_user)):
@@ -423,14 +590,18 @@ def create_app(data_dir=None, encoder=None, start_worker=True):
         fields = body.model_dump(exclude_unset=True)
         with database.connect() as db:
             db.execute('BEGIN IMMEDIATE')
-            owned(db, photo_id, user['id'])
+            row = owned(db, photo_id, user['id'])
+            if row['trashed_at']:
+                raise HTTPException(409, '请先恢复照片再编辑')
             if 'album_id' in fields:
                 check_album(db, fields['album_id'], user['id'])
                 fields['album_id'] = fields['album_id'] or None
             manual = fields.pop('tags', None)
             for field, value in fields.items():
-                if value is None and field != 'album_id':
+                if value is None and field not in {'album_id','taken_at'}:
                     raise HTTPException(422, '该字段不可为空')
+                if field == 'taken_at' and value is not None:
+                    value = value.isoformat()
                 db.execute(f'UPDATE photos SET {field}=? WHERE id=? AND owner_id=?', (value, photo_id, user['id']))
             if manual is not None:
                 db.execute('UPDATE photos SET tags_edited=1 WHERE id=?', (photo_id,))
@@ -446,7 +617,7 @@ def create_app(data_dir=None, encoder=None, start_worker=True):
         with database.connect() as db:
             db.execute('BEGIN IMMEDIATE')
             owned(db, photo_id, user['id'])
-            db.execute("UPDATE photos SET status='deleting',embedding=NULL WHERE id=? AND owner_id=?", (photo_id, user['id']))
+            db.execute('UPDATE photos SET trashed_at=COALESCE(trashed_at,?) WHERE id=? AND owner_id=?', (now(), photo_id, user['id']))
         worker.wake.set()
         return {'ok': True}
 
@@ -455,7 +626,7 @@ def create_app(data_dir=None, encoder=None, start_worker=True):
         with database.connect() as db:
             db.execute('BEGIN IMMEDIATE')
             row = owned(db, photo_id, user['id'])
-            if row['status'] not in {'failed', 'ready'}:
+            if row['trashed_at'] or row['status'] not in {'failed', 'ready'}:
                 raise HTTPException(409, '照片已在分析队列中')
             db.execute("UPDATE photos SET status='pending',error=NULL,embedding=NULL WHERE id=?", (photo_id,))
         worker.wake.set()
@@ -463,6 +634,7 @@ def create_app(data_dir=None, encoder=None, start_worker=True):
 
     @app.get('/api/photos/{photo_id}/similar')
     def similar(photo_id: str, limit: int = Query(30, ge=1, le=100),
+                min_score: float | None = Query(None, ge=-1, le=1),
                 strictness: Literal['broad', 'balanced', 'strict'] = 'balanced',
                 tags: list[str] = Query(default=[], max_length=30), album_id: str = '',
                 favorite: bool = False, location: str = '', start: date | None = None,
@@ -471,11 +643,11 @@ def create_app(data_dir=None, encoder=None, start_worker=True):
             raise HTTPException(422, '开始日期不能晚于结束日期')
         with database.connect() as db:
             row = owned(db, photo_id, user['id'])
-        if row['status'] != 'ready' or row['model_id'] != encoder.model_id:
+        if row['trashed_at'] or row['status'] != 'ready' or row['model_id'] != encoder.model_id:
             raise HTTPException(409, '该照片尚未完成当前模型的分析')
         import numpy as np
         return rank(database, encoder, user['id'], np.frombuffer(row['embedding'], dtype=np.float32),
-                    limit=limit, exclude=photo_id, mode='image', strictness=strictness,
+                    limit=limit, min_score=min_score, mode='image', strictness=strictness,
                     tags=tags, album_id=album_id, favorite=favorite, location=location, start=start, end=end)
 
     @app.post('/api/search')
@@ -508,6 +680,65 @@ def create_app(data_dir=None, encoder=None, start_worker=True):
                     'mode': 'text' if text else 'image'}
 
         return await run_in_threadpool(execute)
+
+    @app.get('/api/music/tracks')
+    def list_music(user=Depends(current_user)):
+        with database.connect() as db:
+            return [dict(row) for row in db.execute(
+                'SELECT id,name,mime,size,created_at FROM music_tracks WHERE owner_id=? ORDER BY created_at,id',
+                (user['id'],))]
+
+    @app.post('/api/music/tracks', status_code=201)
+    async def add_music(file: UploadFile = File(...), user=Depends(current_user)):
+        data = await read_upload(file)
+        if not data or len(data) > 15 * 1024 * 1024:
+            raise HTTPException(413, '歌曲不能为空且不得超过 15 MiB')
+        suffix = Path(file.filename or '').suffix.lower()
+        signatures = {
+            '.mp3': ('audio/mpeg', lambda value: value.startswith(b'ID3') or len(value) > 1 and value[0] == 255 and value[1] & 224 == 224),
+            '.wav': ('audio/wav', lambda value: value.startswith(b'RIFF') and value[8:12] == b'WAVE'),
+            '.ogg': ('audio/ogg', lambda value: value.startswith(b'OggS')),
+        }
+        if suffix not in signatures or not signatures[suffix][1](data):
+            raise HTTPException(415, '仅支持有效的 MP3、WAV、OGG 歌曲')
+        track_id = uuid.uuid4().hex
+        name = Path(file.filename or '未命名歌曲').stem.strip()[:120] or '未命名歌曲'
+        mime = signatures[suffix][0]
+        path = database.music_files / track_id
+        try:
+            with database.connect() as db:
+                db.execute('BEGIN IMMEDIATE')
+                if db.execute('SELECT count(*) FROM music_tracks WHERE owner_id=?', (user['id'],)).fetchone()[0] >= 50:
+                    raise HTTPException(409, '每个账户最多保存 50 首歌曲')
+                path.write_bytes(data)
+                db.execute('INSERT INTO music_tracks(id,owner_id,name,mime,size,created_at) VALUES(?,?,?,?,?,?)',
+                           (track_id,user['id'],name,mime,len(data),now()))
+        except Exception:
+            path.unlink(missing_ok=True)
+            raise
+        return {'id': track_id, 'name': name, 'mime': mime, 'size': len(data)}
+
+    @app.get('/api/music/tracks/{track_id}/file')
+    def music_file(track_id: str, user=Depends(current_user)):
+        with database.connect() as db:
+            row = db.execute('SELECT mime FROM music_tracks WHERE id=? AND owner_id=?', (track_id,user['id'])).fetchone()
+        if not row:
+            raise HTTPException(404, '歌曲不存在')
+        path = database.music_files / track_id
+        if not path.is_file():
+            raise HTTPException(404, '歌曲文件丢失')
+        return FileResponse(path, media_type=row['mime'], headers={'Accept-Ranges': 'bytes'})
+
+    @app.delete('/api/music/tracks/{track_id}')
+    def delete_music(track_id: str, user=Depends(current_user)):
+        with database.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row = db.execute('SELECT 1 FROM music_tracks WHERE id=? AND owner_id=?', (track_id,user['id'])).fetchone()
+            if not row:
+                raise HTTPException(404, '歌曲不存在')
+            db.execute('DELETE FROM music_tracks WHERE id=? AND owner_id=?', (track_id,user['id']))
+        (database.music_files / track_id).unlink(missing_ok=True)
+        return {'ok': True}
 
     @app.get('/')
     @app.get('/admin')

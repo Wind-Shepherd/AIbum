@@ -17,6 +17,9 @@ parser = argparse.ArgumentParser(description='AIbum 本地账户管理')
 parser.add_argument('action', choices=['create-admin', 'make-admin', 'activate'])
 parser.add_argument('username')
 args = parser.parse_args()
+args.username = args.username.strip()
+if not args.username or len(args.username) > 20 or any(ord(c) < 32 for c in args.username):
+    parser.error('用户名应为 1–20 个字符且不能含控制字符')
 database = Database(Path(os.environ.get('AIBUM_DATA_DIR', ROOT / 'data')))
 with database.connect() as db:
     row = db.execute('SELECT id FROM users WHERE username=?', (args.username,)).fetchone()

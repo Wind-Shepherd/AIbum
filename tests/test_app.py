@@ -16,6 +16,27 @@ HEADERS = {'X-AIbum-Request': '1'}
 PASSWORD = 'test-password-123'
 
 
+def test_create_admin_command(tmp_path, monkeypatch, capsys):
+    import runpy
+    import sys
+    from pathlib import Path
+    monkeypatch.setenv('AIBUM_DATA_DIR', str(tmp_path))
+    monkeypatch.setattr(sys, 'argv', ['manage.py', 'create-admin', '  admin  '])
+    monkeypatch.setattr('getpass.getpass', lambda prompt: PASSWORD)
+    script = str(Path(__file__).resolve().parents[1] / 'scripts' / 'manage.py')
+    runpy.run_path(script, run_name='__main__')
+    output = capsys.readouterr().out
+    assert 'recovery code' in output
+    app = create_app(tmp_path, encoder=TestEncoder(), start_worker=False)
+    with TestClient(app, headers=HEADERS) as client:
+        response = client.post('/api/admin/login', json={'username': 'admin', 'password': PASSWORD})
+        assert response.status_code == 200
+        assert response.json()['is_admin']
+        assert client.get('/api/admin/overview').status_code == 200
+    with pytest.raises(SystemExit):
+        runpy.run_path(script, run_name='__main__')
+
+
 class TestEncoder:
     """Deterministic test double: proves plumbing, never model quality."""
     __test__ = False
@@ -38,6 +59,35 @@ def picture(color='red', size=(32, 24)):
     data = BytesIO()
     Image.new('RGB', size, color).save(data, 'PNG')
     return data.getvalue()
+
+
+def test_personal_profile_avatar_isolation_and_persistence(tmp_path):
+    app = create_app(tmp_path, encoder=TestEncoder(), start_worker=False)
+    with TestClient(app, headers=HEADERS) as client:
+        signup(client, 'profile_owner')
+        assert client.get('/api/auth/avatar').status_code == 404
+        assert client.patch('/api/auth/profile', json={'nickname':'  时光收藏家  '}).json()['nickname'] == '时光收藏家'
+        assert client.patch('/api/auth/profile', json={'nickname':'x'*31}).status_code == 422
+        assert client.patch('/api/auth/profile', json={'nickname':'bad\nname'}).status_code == 422
+        assert client.post('/api/auth/avatar', files={'file':('bad.png',b'not an image')}).status_code == 415
+        assert client.post('/api/auth/avatar', files={'file':('big.png',b'x'*(5*1024*1024+1))}).status_code == 413
+        response = client.post('/api/auth/avatar', files={'file':('portrait.png',picture(size=(160,80)))})
+        assert response.status_code == 200
+        version = response.json()['avatar_version']
+        avatar = client.get('/api/auth/avatar')
+        assert avatar.headers['content-type'] == 'image/jpeg'
+        assert avatar.headers['cache-control'] == 'no-store'
+        assert Image.open(BytesIO(avatar.content)).size == (256,256)
+        client.post('/api/auth/logout')
+        assert client.get('/api/auth/avatar').status_code == 401
+        signup(client, 'other_profile')
+        assert client.get('/api/auth/avatar').status_code == 404
+        assert client.get('/api/auth/me').json()['nickname'] == ''
+    reopened = create_app(tmp_path, encoder=TestEncoder(), start_worker=False)
+    with TestClient(reopened, headers=HEADERS) as client:
+        user = client.post('/api/auth/login', json={'username':'profile_owner','password':PASSWORD}).json()
+        assert user['nickname'] == '时光收藏家' and user['avatar_version'] == version
+        assert client.get('/api/auth/avatar').status_code == 200
 
 
 def signup(client, name='alice'):
@@ -107,6 +157,10 @@ def test_photo_lifecycle_and_manual_tags(env):
     app.state.worker.step()
     assert client.get('/api/photos/' + photo['id']).json()['tags'] == []
     assert client.delete('/api/photos/' + photo['id']).status_code == 202
+    assert client.get(photo['original_url']).status_code == 200
+    assert client.get('/api/photos').json()['total'] == 0
+    assert client.get('/api/photos?trash=true').json()['total'] == 1
+    assert client.delete('/api/photos/' + photo['id'] + '/permanent').status_code == 202
     assert client.get(photo['original_url']).status_code == 404
     assert client.get('/api/photos').json()['total'] == 0
     app.state.worker.step()
@@ -154,7 +208,7 @@ def test_search_and_no_fusion(env):
     assert response['filtered_count'] == 1 and response['candidate_count'] == 2
     results = client.post('/api/search', files={'image': ('ref.png', picture('blue'))}).json()['items']
     assert results[0]['id'] == blue['id']
-    assert client.get(f'/api/photos/{red["id"]}/similar').json()['items'] == []
+    assert [item['id'] for item in client.get(f'/api/photos/{red["id"]}/similar').json()['items']] == [red['id']]
     assert client.post('/api/search', data={'text': 'x'}, files={'image': ('x.png', picture())}).status_code == 422
     assert client.post('/api/search', data={'text': ' '}).status_code == 422
     assert client.post('/api/search', data={'text': 'x', 'tag': '没有'}).json()['items'] == []
@@ -175,11 +229,35 @@ def test_relevance_floor_gap_and_strictness(env):
     balanced = client.post('/api/search', data={'text': '测试'}).json()
     assert len(broad['items']) == 2 and len(balanced['items']) == 1
     assert balanced['items'][0]['score'] == pytest.approx(.44)
+    assert len(client.post('/api/search',data={'text':'测试','min_score':'.35'}).json()['items']) == 2
+    assert len(client.post('/api/search',data={'text':'测试','min_score':'.2'}).json()['items']) == 3
     with app.state.database.connect() as db:
         vector = np.array([.20, np.sqrt(.96), 0], dtype=np.float32)
         db.execute('UPDATE photos SET embedding=?', (vector.tobytes(),))
     assert client.post('/api/search', data={'text': '无关'}).json()['items'] == []
     assert client.post('/api/search', data={'text': 'x', 'strictness': 'invalid'}).status_code == 422
+
+
+def test_private_music_playlist(tmp_path):
+    import wave
+    sound = BytesIO()
+    with wave.open(sound,'wb') as wav:
+        wav.setnchannels(1); wav.setsampwidth(1); wav.setframerate(8000); wav.writeframes(b'\x80'*800)
+    app = create_app(tmp_path, encoder=TestEncoder(), start_worker=False)
+    with TestClient(app, headers=HEADERS) as alice, TestClient(app, headers=HEADERS) as bob:
+        signup(alice,'music_alice'); signup(bob,'music_bob')
+        assert alice.post('/api/music/tracks',files={'file':('bad.wav',b'not music')}).status_code == 415
+        added = alice.post('/api/music/tracks',files={'file':('Afternoon.wav',sound.getvalue())})
+        assert added.status_code == 201
+        track = added.json()
+        assert [item['id'] for item in alice.get('/api/music/tracks').json()] == [track['id']]
+        assert bob.get('/api/music/tracks').json() == []
+        url = f"/api/music/tracks/{track['id']}/file"
+        assert alice.get(url).content == sound.getvalue()
+        assert bob.get(url).status_code == 404
+        assert bob.delete(f"/api/music/tracks/{track['id']}").status_code == 404
+        assert alice.delete(f"/api/music/tracks/{track['id']}").status_code == 200
+        assert alice.get(url).status_code == 404
 
 
 def test_tag_checkboxes_match_any_selected_and_admin_entry(env):
@@ -283,3 +361,54 @@ def test_concurrent_dedup_and_quota(env):
     assert upload(client)['duplicate'] is True
     assert client.post('/api/photos', files={'file': ('b.png', picture('blue'))}).status_code == 409
     assert len(list(app.state.database.files.iterdir())) == 2
+
+
+def test_folders_stories_trash_and_random(env):
+    app, client = env
+    signup(client)
+    root = client.post('/api/albums', json={'name':'Chapter'}).json()['id']
+    child = client.post('/api/albums', json={'name':'Page', 'parent_id':root}).json()['id']
+    assert client.patch('/api/albums/'+root,json={'parent_id':child}).status_code == 409
+    assert client.patch('/api/albums/'+root,json={'parent_id':root}).status_code == 409
+    assert client.patch('/api/albums/'+root,json={'name':'   '}).status_code == 422
+    photo = upload(client)['photo']; pid = photo['id']
+    other = upload(client,'blue')['photo']; oid = other['id']
+    app.state.worker.step(); app.state.worker.step()
+    patch = client.patch('/api/photos/'+pid,json={'album_id':child,'story':'那年夏天\n风轻轻地吹','taken_at':'2020-06-20'})
+    assert patch.status_code == 200 and patch.json()['taken_at'] == '2020-06-20'
+    assert client.patch('/api/photos/'+pid,json={'taken_at':'2020-99-99'}).status_code == 422
+    assert client.patch('/api/photos/'+pid,json={'story':'字'*4001}).status_code == 422
+    assert client.patch('/api/albums/'+child,json={'cover_id':oid}).status_code == 409
+    assert client.patch('/api/albums/'+child,json={'cover_id':pid}).status_code == 200
+    assert next(a for a in client.get('/api/albums').json() if a['id']==child)['previews'][0] == pid
+    assert client.get('/api/memories/random?exclude='+pid).json()['id'] == oid
+    assert client.delete('/api/photos/'+pid+'/permanent').status_code == 409
+    client.delete('/api/photos/'+pid)
+    assert client.get('/api/photos?trash=true').json()['items'][0]['story'] == '那年夏天\n风轻轻地吹'
+    assert client.get('/api/photos').json()['total'] == 1
+    assert client.get('/api/memories/random').json()['id'] == oid
+    assert all(p['id']!=pid for p in client.post('/api/search',data={'text':'red'}).json()['items'])
+    assert client.patch('/api/photos/'+pid,json={'story':'overwrite'}).status_code == 409
+    assert client.post('/api/photos/'+pid+'/retry').status_code == 409
+    assert upload_duplicate_status(client) == 409
+    assert client.delete('/api/albums/'+root).status_code == 200
+    assert next(a for a in client.get('/api/albums').json() if a['id']==child)['parent_id'] is None
+    assert client.delete('/api/albums/'+child).status_code == 200
+    assert client.post('/api/photos/'+pid+'/restore').status_code == 200
+    restored=client.get('/api/photos/'+pid).json()
+    assert restored['album_id'] is None and restored['story'].startswith('那年夏天') and restored['taken_at']=='2020-06-20'
+    assert client.get(photo['original_url']).content == picture()
+    assert client.patch('/api/photos/'+pid,json={'taken_at':None}).status_code == 200
+    with TestClient(app, headers=HEADERS) as second:
+        signup(second,'folder_intruder')
+        for path in ['/restore']:
+            assert second.post('/api/photos/'+pid+path).status_code == 404
+        assert second.delete('/api/photos/'+pid+'/permanent').status_code == 404
+        assert second.get('/api/memories/random').status_code == 404
+        ownfolder=second.post('/api/albums',json={'name':'Private'}).json()['id']
+        assert client.patch('/api/photos/'+pid,json={'album_id':ownfolder}).status_code == 404
+        assert client.patch('/api/albums/'+ownfolder,json={'name':'Steal'}).status_code == 404
+
+
+def upload_duplicate_status(client):
+    return client.post('/api/photos',files={'file':('same.png',picture(),'image/png')}).status_code

@@ -9,23 +9,21 @@
       "text": "两只猫",
       "top1": "cat",
       "scores": [
-        0.43840789794921875,
-        0.3184264898300171
+        0.43840789794921875
       ],
-      "elapsed_ms": 44
+      "elapsed_ms": 34
     },
     {
       "text": "一只狗",
       "top1": "dog",
       "scores": [
-        0.40498775243759155,
-        0.3501399755477905
+        0.40498775243759155
       ],
-      "elapsed_ms": 26
+      "elapsed_ms": 28
     }
   ],
   "scope": "two-photo smoke test only",
-  "cold_analysis_seconds": 9.167,
+  "cold_analysis_seconds": 32.266,
   "tags": {
     "cat": [
       {
@@ -51,7 +49,7 @@
     ]
   },
   "synthetic_500_rank_ms": {
-    "p50": 10.96,
+    "p50": 11.33,
     "p95": 13.28
   },
   "device": "cpu"

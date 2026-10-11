@@ -8,6 +8,8 @@ class Database:
         self.root = root
         self.files = root / 'photos'
         self.files.mkdir(parents=True, exist_ok=True)
+        self.music_files = root / 'music'
+        self.music_files.mkdir(parents=True, exist_ok=True)
         self.path = root / 'album.sqlite3'
         with self.connect() as db:
             db.execute('PRAGMA journal_mode=WAL')
@@ -36,11 +38,18 @@ class Database:
                     photo_id TEXT NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
                     name TEXT NOT NULL, kind TEXT NOT NULL, source TEXT NOT NULL,
                     score REAL, PRIMARY KEY(photo_id, name));
+                CREATE TABLE IF NOT EXISTS music_tracks (
+                    id TEXT PRIMARY KEY, owner_id TEXT NOT NULL REFERENCES users(id),
+                    name TEXT NOT NULL, mime TEXT NOT NULL, size INTEGER NOT NULL,
+                    created_at TEXT NOT NULL);
+                CREATE INDEX IF NOT EXISTS music_owner ON music_tracks(owner_id, created_at);
             ''')
             additions = {
                 'users': {'is_admin': 'INTEGER NOT NULL DEFAULT 0', 'active': 'INTEGER NOT NULL DEFAULT 1',
-                          'recovery_hash': 'TEXT'},
-                'photos': {'tags_edited': 'INTEGER NOT NULL DEFAULT 0'},
+                          'recovery_hash': 'TEXT', 'nickname': "TEXT NOT NULL DEFAULT ''",
+                          'avatar': 'BLOB', 'avatar_version': "TEXT NOT NULL DEFAULT ''"},
+                 'photos': {'tags_edited': 'INTEGER NOT NULL DEFAULT 0', 'story': "TEXT NOT NULL DEFAULT ''", 'trashed_at': 'TEXT'},
+                'albums': {'parent_id': 'TEXT', 'cover_id': 'TEXT'},
             }
             for table, columns in additions.items():
                 existing = {r['name'] for r in db.execute(f'PRAGMA table_info({table})')}

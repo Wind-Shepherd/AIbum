@@ -17,7 +17,7 @@ LOG = logging.getLogger('aibum')
 MAX_BYTES = 20 * 1024 * 1024
 MAX_PIXELS = 40_000_000
 PUBLIC_COLUMNS = ('id', 'album_id', 'name', 'mime', 'size', 'width', 'height', 'created_at',
-                  'taken_at', 'camera', 'location', 'favorite', 'status', 'error')
+                  'taken_at', 'camera', 'location', 'favorite', 'status', 'error', 'story', 'trashed_at')
 
 
 def now():
@@ -100,6 +100,8 @@ def save_photo(database, user, filename, data, album_id=None):
                 thumb.unlink(missing_ok=True)
                 if duplicate['status'] == 'deleting':
                     raise HTTPException(409, '同一照片正在删除，请稍后上传')
+                if duplicate['trashed_at']:
+                    raise HTTPException(409, '照片已在回收站，请先恢复')
                 return photo_dict(db, duplicate), True
             if db.execute('SELECT count(*) FROM photos WHERE owner_id=?', (user,)).fetchone()[0] >= 500:
                 raise HTTPException(409, '每个账户最多保存 500 张照片，请先整理照片库')
@@ -124,8 +126,8 @@ def save_photo(database, user, filename, data, album_id=None):
         raise
 
 
-def filters(user, tag='', album_id='', favorite=False, location='', start=None, end=None, tags=None):
-    clauses = ["p.owner_id=?", "p.status!='deleting'"]
+def filters(user, tag='', album_id='', favorite=False, location='', start=None, end=None, tags=None, trash=False):
+    clauses = ["p.owner_id=?", "p.status!='deleting'", "p.trashed_at IS NOT NULL" if trash else "p.trashed_at IS NULL"]
     values = [user]
     if tag:
         clauses.append('EXISTS (SELECT 1 FROM photo_tags t WHERE t.photo_id=p.id AND t.name=?)')
@@ -135,7 +137,9 @@ def filters(user, tag='', album_id='', favorite=False, location='', start=None, 
         clauses.append('EXISTS (SELECT 1 FROM photo_tags t WHERE t.photo_id=p.id AND t.name IN ('
                        + ','.join('?' for _ in tags) + '))')
         values.extend(tags)
-    if album_id:
+    if album_id == '__unfiled__':
+        clauses.append('p.album_id IS NULL')
+    elif album_id:
         clauses.append('p.album_id=?')
         values.append(album_id)
     if favorite:
@@ -167,14 +171,15 @@ def rank(database, encoder, user, vector, limit=30, min_score=None, exclude=None
             AND p.model_id=? ORDER BY p.id''', [*values, encoder.model_id]).fetchall()
         rows = [r for r in rows if r['id'] != exclude]
         floor, max_gap = MATCHING_RULES[mode][strictness]
-        floor = max(floor, min_score) if min_score is not None else floor
+        # An explicit slider value is the whole cutoff, without the relative top-score gate.
+        floor = min_score if min_score is not None else floor
         if not rows:
             return {'items': [], 'candidate_count': 0, 'matched_count': 0,
                     'filtered_count': 0, 'threshold': floor, 'strictness': strictness}
         matrix = np.stack([np.frombuffer(r['embedding'], dtype=np.float32) for r in rows])
         scores = matrix @ normalize(vector)
         # shortcut: heuristic rejection gates; calibrate on the team's labeled photos.
-        cutoff = max(floor, float(scores.max()) - max_gap)
+        cutoff = floor if min_score is not None else max(floor, float(scores.max()) - max_gap)
         matching = [int(i) for i in np.argsort(-scores, kind='stable') if scores[i] >= cutoff]
         result = []
         for i in matching[:limit]:
