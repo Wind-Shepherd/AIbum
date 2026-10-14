@@ -27,7 +27,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from .db import Database
 from .encoder import ChineseClipEncoder, ModelUnavailable, ROOT, normalize
 from .photos import (AnalysisWorker, MAX_BYTES, check_album, decode_image, filters,
-                     now, owned, photo_dict, rank, save_photo)
+                     now, owned, photo_dict, rank, save_photo, semantic_resolver, tag_color_value)
 
 LOG = logging.getLogger('aibum')
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(name)s %(message)s')
@@ -97,6 +97,8 @@ class AlbumPatch(BaseModel):
 
 
 class PhotoPatch(BaseModel):
+    latitude: float | None = Field(default=None, ge=-90, le=90)
+    longitude: float | None = Field(default=None, ge=-180, le=180)
     story: str | None = Field(default=None, max_length=4000)
     taken_at: date | None = None
     name: str | None = Field(default=None, min_length=1, max_length=200)
@@ -269,8 +271,10 @@ def create_app(data_dir=None, encoder=None, start_worker=True):
             user = db.execute('SELECT * FROM users WHERE username=?', (body.username,)).fetchone()
         salt = user['password_hash'].split(':')[0] if user else '0' * 32
         candidate = password_hash(body.password, salt)
-        if not user or not hmac.compare_digest(candidate, user['password_hash']) or not user['active']:
+        if not user or not hmac.compare_digest(candidate, user['password_hash']):
             raise HTTPException(401, '用户名或密码错误')
+        if not user['active']:
+            raise HTTPException(403, '您的帐户已被停用，请联系管理员')
         if require_admin and not user['is_admin']:
             raise HTTPException(403, '此账号没有管理员权限，请使用普通用户入口')
         with database.connect() as db:
@@ -332,6 +336,8 @@ def create_app(data_dir=None, encoder=None, start_worker=True):
     @app.post('/api/auth/logout')
     def logout(request: Request, response: Response):
         with database.connect() as db:
+            db.execute('DELETE FROM ai_grants WHERE owner_id IN (SELECT user_id FROM sessions WHERE token_hash=?)',
+                       (token_hash(request.cookies.get(COOKIE, '')),))
             db.execute('DELETE FROM sessions WHERE token_hash=?', (token_hash(request.cookies.get(COOKIE, '')),))
         response.delete_cookie(COOKIE)
         return {'ok': True}
@@ -508,8 +514,9 @@ def create_app(data_dir=None, encoder=None, start_worker=True):
     @app.get('/api/tags')
     def tags(user=Depends(current_user)):
         with database.connect() as db:
-            return [dict(r) for r in db.execute('''SELECT t.name,count(*) count FROM photo_tags t
-                JOIN photos p ON p.id=t.photo_id WHERE p.owner_id=? AND p.status!='deleting' AND p.trashed_at IS NULL
+            return [{**dict(r),'color':tag_color_value(r['name'],r['color'])} for r in db.execute('''SELECT t.name,count(*) count,c.color FROM photo_tags t
+                JOIN photos p ON p.id=t.photo_id LEFT JOIN tag_colors c ON c.name=t.name AND c.owner_id=p.owner_id
+                WHERE p.owner_id=? AND p.status!='deleting' AND p.trashed_at IS NULL
                 GROUP BY t.name ORDER BY count DESC,t.name''', (user['id'],))]
 
     @app.post('/api/photos', status_code=201)
@@ -522,53 +529,22 @@ def create_app(data_dir=None, encoder=None, start_worker=True):
 
     @app.get('/api/photos')
     def list_photos(tag: str = '', album_id: str = '', favorite: bool = False, location: str = '',
-                    tags: list[str] = Query(default=[], max_length=30), trash: bool = False,
+                    tags: list[str] = Query(default=[], max_length=30), trash: bool = False, tag_expr: str = Query('', max_length=12000),
                     start: date | None = None, end: date | None = None,
                     page: int = Query(1, ge=1), page_size: int = Query(40, ge=1, le=100),
-                    order: str = Query('newest', pattern='^(newest|oldest)$'), user=Depends(current_user)):
+                    order: str = Query('newest', pattern='^(newest|oldest|name_asc|name_desc)$'), user=Depends(current_user)):
         if start and end and start > end:
             raise HTTPException(422, '开始日期不能晚于结束日期')
-        where, values = filters(user['id'], tag, album_id, favorite, location, start, end, tags=tags, trash=trash)
+        where, values = filters(user['id'], tag, album_id, favorite, location, start, end, tags=tags, trash=trash, tag_expr=tag_expr,
+                               resolve_search=semantic_resolver(database, encoder, user['id']))
         with database.connect() as db:
             total = db.execute(f'SELECT count(*) FROM photos p WHERE {where}', values).fetchone()[0]
-            direction = 'DESC' if order == 'newest' else 'ASC'
+            direction = 'DESC' if order in {'newest','name_desc'} else 'ASC'
+            sort_column = 'p.name COLLATE NOCASE' if order.startswith('name_') else 'COALESCE(p.taken_at,p.created_at)'
             rows = db.execute(f'''SELECT p.* FROM photos p WHERE {where}
-                ORDER BY COALESCE(p.taken_at,p.created_at) {direction},p.id LIMIT ? OFFSET ?''',
+                ORDER BY {sort_column} {direction},p.id LIMIT ? OFFSET ?''',
                 [*values, page_size, (page - 1) * page_size]).fetchall()
             return {'items': [photo_dict(db, r) for r in rows], 'total': total, 'page': page}
-
-    @app.post('/api/photos/download')
-    def download_photos(body: PhotoDownload, user=Depends(current_user)):
-        photo_ids = list(dict.fromkeys(body.photo_ids))
-        with database.connect() as db:
-            rows = db.execute(f'''SELECT id,name FROM photos WHERE owner_id=? AND status!='deleting'
-                AND id IN ({','.join('?' for _ in photo_ids)})''', [user['id'], *photo_ids]).fetchall()
-        photos = {row['id']: row for row in rows}
-        if len(photos) != len(photo_ids):
-            raise HTTPException(404, '部分照片不存在或不可下载')
-        archive = SpooledTemporaryFile(max_size=32 * 1024 * 1024, mode='w+b')
-        try:
-            with zipfile.ZipFile(archive, 'w', compression=zipfile.ZIP_DEFLATED) as bundle:
-                for photo_id in photo_ids:
-                    path = database.original(photo_id)
-                    if not path.is_file():
-                        raise HTTPException(404, '部分照片文件暂不可用')
-                    name = Path(photos[photo_id]['name']).name or '照片'
-                    bundle.write(path, f'{photo_id[:8]}_{name}')
-            archive.seek(0)
-        except Exception:
-            archive.close()
-            raise
-
-        def stream_archive():
-            try:
-                while chunk := archive.read(1024 * 1024):
-                    yield chunk
-            finally:
-                archive.close()
-
-        return StreamingResponse(stream_archive(), media_type='application/zip',
-                                 headers={'Content-Disposition': 'attachment; filename="aibum-photos.zip"'})
 
     @app.get('/api/photos/{photo_id}')
     def get_photo(photo_id: str, user=Depends(current_user)):
@@ -588,6 +564,10 @@ def create_app(data_dir=None, encoder=None, start_worker=True):
     @app.patch('/api/photos/{photo_id}')
     def patch_photo(photo_id: str, body: PhotoPatch, user=Depends(current_user)):
         fields = body.model_dump(exclude_unset=True)
+        if ('latitude' in fields) != ('longitude' in fields) or ((fields.get('latitude') is None) != (fields.get('longitude') is None)):
+            raise HTTPException(422, '经纬度须同时填写或清空')
+        if 'taken_at' in fields:
+            fields['date_source'] = 'manual' if fields['taken_at'] else 'upload'
         with database.connect() as db:
             db.execute('BEGIN IMMEDIATE')
             row = owned(db, photo_id, user['id'])
@@ -598,7 +578,7 @@ def create_app(data_dir=None, encoder=None, start_worker=True):
                 fields['album_id'] = fields['album_id'] or None
             manual = fields.pop('tags', None)
             for field, value in fields.items():
-                if value is None and field not in {'album_id','taken_at'}:
+                if value is None and field not in {'album_id','taken_at','latitude','longitude'}:
                     raise HTTPException(422, '该字段不可为空')
                 if field == 'taken_at' and value is not None:
                     value = value.isoformat()
@@ -634,7 +614,7 @@ def create_app(data_dir=None, encoder=None, start_worker=True):
 
     @app.get('/api/photos/{photo_id}/similar')
     def similar(photo_id: str, limit: int = Query(30, ge=1, le=100),
-                min_score: float | None = Query(None, ge=-1, le=1),
+                min_score: float | None = Query(None, ge=-1, le=1), tag_expr: str = Query('', max_length=12000),
                 strictness: Literal['broad', 'balanced', 'strict'] = 'balanced',
                 tags: list[str] = Query(default=[], max_length=30), album_id: str = '',
                 favorite: bool = False, location: str = '', start: date | None = None,
@@ -648,12 +628,12 @@ def create_app(data_dir=None, encoder=None, start_worker=True):
         import numpy as np
         return rank(database, encoder, user['id'], np.frombuffer(row['embedding'], dtype=np.float32),
                     limit=limit, min_score=min_score, mode='image', strictness=strictness,
-                    tags=tags, album_id=album_id, favorite=favorite, location=location, start=start, end=end)
+                    tags=tags, tag_expr=tag_expr, album_id=album_id, favorite=favorite, location=location, start=start, end=end)
 
     @app.post('/api/search')
     async def search(text: str = Form('', max_length=500), image: UploadFile | None = File(None),
                      limit: int = Form(30, ge=1, le=100),
-                     min_score: float | None = Form(None, ge=-1, le=1), tag: str = Form(''),
+                     min_score: float | None = Form(None, ge=-1, le=1), tag_expr: str = Form('', max_length=12000), tag: str = Form(''),
                      tags: list[str] = Form(default=[], max_length=30),
                      strictness: Literal['broad', 'balanced', 'strict'] = Form('balanced'),
                      album_id: str = Form(''), favorite: bool = Form(False), location: str = Form(''),
@@ -675,7 +655,7 @@ def create_app(data_dir=None, encoder=None, start_worker=True):
             vector = text_vector if image_vector is None else image_vector
             results = rank(database, encoder, user['id'], vector, limit, min_score, tag=tag,
                            album_id=album_id, favorite=favorite, location=location, start=start, end=end,
-                           tags=tags, mode='text' if text else 'image', strictness=strictness)
+                           tags=tags, tag_expr=tag_expr, mode='text' if text else 'image', strictness=strictness)
             return {**results, 'elapsed_ms': round((time.perf_counter() - started) * 1000),
                     'mode': 'text' if text else 'image'}
 
@@ -744,6 +724,9 @@ def create_app(data_dir=None, encoder=None, start_worker=True):
     @app.get('/admin')
     def index():
         return FileResponse(ROOT / 'web' / 'index.html')
+
+    from .features import install_features
+    install_features(app, database, current_user, administrator, worker, ROOT)
 
     app.mount('/static', StaticFiles(directory=ROOT / 'web'), name='static')
     return app

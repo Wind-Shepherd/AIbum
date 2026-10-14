@@ -1,0 +1,499 @@
+{
+  "version": 1,
+  "note": "公开演示素材；目录和日期仅为测试，不代表真实旅行。",
+  "albums": [
+    {
+      "id": "album-1",
+      "name": "01-旅途手记",
+      "parent_id": null,
+      "cover_id": null
+    },
+    {
+      "id": "album-2",
+      "name": "第一天",
+      "parent_id": "album-1",
+      "cover_id": null
+    },
+    {
+      "id": "album-3",
+      "name": "第二天",
+      "parent_id": "album-1",
+      "cover_id": null
+    },
+    {
+      "id": "album-4",
+      "name": "上午",
+      "parent_id": "album-3",
+      "cover_id": null
+    },
+    {
+      "id": "album-5",
+      "name": "傍晚",
+      "parent_id": "album-3",
+      "cover_id": null
+    },
+    {
+      "id": "album-6",
+      "name": "02-日常收藏",
+      "parent_id": null,
+      "cover_id": null
+    },
+    {
+      "id": "album-7",
+      "name": "周末散步",
+      "parent_id": "album-6",
+      "cover_id": null
+    },
+    {
+      "id": "album-8",
+      "name": "03-旧日片段",
+      "parent_id": null,
+      "cover_id": null
+    },
+    {
+      "id": "album-9",
+      "name": "2025",
+      "parent_id": "album-8",
+      "cover_id": null
+    },
+    {
+      "id": "album-10",
+      "name": "秋日",
+      "parent_id": "album-9",
+      "cover_id": null
+    },
+    {
+      "id": "album-11",
+      "name": "值得记住",
+      "parent_id": "album-10",
+      "cover_id": null
+    }
+  ],
+  "photos": [
+    {
+      "id": "photo-1",
+      "file": "photos/01.jpg",
+      "name": "01-拾光-30.jpg",
+      "album_id": null,
+      "location": "",
+      "latitude": null,
+      "longitude": null,
+      "story": "演示照片，用来体验整理、标签与对话。",
+      "taken_at": "2023-01-15",
+      "date_source": "test",
+      "favorite": true,
+      "tags": [
+        "演示素材",
+        "日常"
+      ]
+    },
+    {
+      "id": "photo-2",
+      "file": "photos/02.jpg",
+      "name": "02-拾光-31.jpg",
+      "album_id": null,
+      "location": "",
+      "latitude": null,
+      "longitude": null,
+      "story": "演示照片，用来体验整理、标签与对话。",
+      "taken_at": "2024-02-15",
+      "date_source": "test",
+      "favorite": false,
+      "tags": [
+        "演示素材",
+        "日常"
+      ]
+    },
+    {
+      "id": "photo-3",
+      "file": "photos/03.jpg",
+      "name": "03-拾光-32.jpg",
+      "album_id": null,
+      "location": "",
+      "latitude": null,
+      "longitude": null,
+      "story": "演示照片，用来体验整理、标签与对话。",
+      "taken_at": "2025-03-15",
+      "date_source": "test",
+      "favorite": false,
+      "tags": [
+        "演示素材",
+        "日常"
+      ]
+    },
+    {
+      "id": "photo-4",
+      "file": "photos/04.jpg",
+      "name": "04-拾光-33.jpg",
+      "album_id": "album-1",
+      "location": "",
+      "latitude": null,
+      "longitude": null,
+      "story": "演示照片，用来体验整理、标签与对话。",
+      "taken_at": "2023-04-15",
+      "date_source": "test",
+      "favorite": false,
+      "tags": [
+        "演示素材",
+        "旅途"
+      ]
+    },
+    {
+      "id": "photo-5",
+      "file": "photos/05.jpg",
+      "name": "05-拾光-34.jpg",
+      "album_id": "album-1",
+      "location": "",
+      "latitude": null,
+      "longitude": null,
+      "story": "演示照片，用来体验整理、标签与对话。",
+      "taken_at": "2024-05-15",
+      "date_source": "test",
+      "favorite": false,
+      "tags": [
+        "演示素材",
+        "旅途"
+      ]
+    },
+    {
+      "id": "photo-6",
+      "file": "photos/06.jpg",
+      "name": "06-拾光-35.jpg",
+      "album_id": "album-1",
+      "location": "",
+      "latitude": null,
+      "longitude": null,
+      "story": "演示照片，用来体验整理、标签与对话。",
+      "taken_at": "2025-06-15",
+      "date_source": "test",
+      "favorite": false,
+      "tags": [
+        "演示素材",
+        "旅途"
+      ]
+    },
+    {
+      "id": "photo-7",
+      "file": "photos/07.jpg",
+      "name": "07-拾光-36.jpg",
+      "album_id": "album-2",
+      "location": "",
+      "latitude": null,
+      "longitude": null,
+      "story": "演示照片，用来体验整理、标签与对话。",
+      "taken_at": "2023-07-15",
+      "date_source": "test",
+      "favorite": true,
+      "tags": [
+        "演示素材",
+        "旅途"
+      ]
+    },
+    {
+      "id": "photo-8",
+      "file": "photos/08.jpg",
+      "name": "08-拾光-37.jpg",
+      "album_id": "album-2",
+      "location": "",
+      "latitude": null,
+      "longitude": null,
+      "story": "演示照片，用来体验整理、标签与对话。",
+      "taken_at": "2024-08-15",
+      "date_source": "test",
+      "favorite": false,
+      "tags": [
+        "演示素材",
+        "旅途"
+      ]
+    },
+    {
+      "id": "photo-9",
+      "file": "photos/09.jpg",
+      "name": "09-拾光-38.jpg",
+      "album_id": "album-2",
+      "location": "",
+      "latitude": null,
+      "longitude": null,
+      "story": "演示照片，用来体验整理、标签与对话。",
+      "taken_at": "2025-09-15",
+      "date_source": "test",
+      "favorite": false,
+      "tags": [
+        "演示素材",
+        "旅途"
+      ]
+    },
+    {
+      "id": "photo-10",
+      "file": "photos/10.jpg",
+      "name": "10-拾光-39.jpg",
+      "album_id": "album-4",
+      "location": "",
+      "latitude": null,
+      "longitude": null,
+      "story": "演示照片，用来体验整理、标签与对话。",
+      "taken_at": "2023-10-15",
+      "date_source": "test",
+      "favorite": false,
+      "tags": [
+        "演示素材",
+        "旅途"
+      ]
+    },
+    {
+      "id": "photo-11",
+      "file": "photos/11.jpg",
+      "name": "11-拾光-40.jpg",
+      "album_id": "album-4",
+      "location": "",
+      "latitude": null,
+      "longitude": null,
+      "story": "演示照片，用来体验整理、标签与对话。",
+      "taken_at": "2024-11-15",
+      "date_source": "test",
+      "favorite": false,
+      "tags": [
+        "演示素材",
+        "旅途"
+      ]
+    },
+    {
+      "id": "photo-12",
+      "file": "photos/12.jpg",
+      "name": "12-拾光-41.jpg",
+      "album_id": "album-4",
+      "location": "",
+      "latitude": null,
+      "longitude": null,
+      "story": "演示照片，用来体验整理、标签与对话。",
+      "taken_at": "2025-12-15",
+      "date_source": "test",
+      "favorite": false,
+      "tags": [
+        "演示素材",
+        "旅途"
+      ]
+    },
+    {
+      "id": "photo-13",
+      "file": "photos/13.jpg",
+      "name": "13-拾光-42.jpg",
+      "album_id": "album-5",
+      "location": "",
+      "latitude": null,
+      "longitude": null,
+      "story": "演示照片，用来体验整理、标签与对话。",
+      "taken_at": "2023-01-15",
+      "date_source": "test",
+      "favorite": true,
+      "tags": [
+        "演示素材",
+        "旅途"
+      ]
+    },
+    {
+      "id": "photo-14",
+      "file": "photos/14.jpg",
+      "name": "14-拾光-43.jpg",
+      "album_id": "album-5",
+      "location": "",
+      "latitude": null,
+      "longitude": null,
+      "story": "演示照片，用来体验整理、标签与对话。",
+      "taken_at": "2024-02-15",
+      "date_source": "test",
+      "favorite": false,
+      "tags": [
+        "演示素材",
+        "旅途"
+      ]
+    },
+    {
+      "id": "photo-15",
+      "file": "photos/15.jpg",
+      "name": "15-拾光-44.jpg",
+      "album_id": "album-5",
+      "location": "",
+      "latitude": null,
+      "longitude": null,
+      "story": "演示照片，用来体验整理、标签与对话。",
+      "taken_at": "2025-03-15",
+      "date_source": "test",
+      "favorite": false,
+      "tags": [
+        "演示素材",
+        "旅途"
+      ]
+    },
+    {
+      "id": "photo-16",
+      "file": "photos/16.jpg",
+      "name": "16-拾光-45.jpg",
+      "album_id": "album-6",
+      "location": "",
+      "latitude": null,
+      "longitude": null,
+      "story": "演示照片，用来体验整理、标签与对话。",
+      "taken_at": "2023-04-15",
+      "date_source": "test",
+      "favorite": false,
+      "tags": [
+        "演示素材",
+        "旅途"
+      ]
+    },
+    {
+      "id": "photo-17",
+      "file": "photos/17.jpg",
+      "name": "17-拾光-46.jpg",
+      "album_id": "album-6",
+      "location": "",
+      "latitude": null,
+      "longitude": null,
+      "story": "演示照片，用来体验整理、标签与对话。",
+      "taken_at": "2024-05-15",
+      "date_source": "test",
+      "favorite": false,
+      "tags": [
+        "演示素材",
+        "旅途"
+      ]
+    },
+    {
+      "id": "photo-18",
+      "file": "photos/18.jpg",
+      "name": "18-拾光-47.jpg",
+      "album_id": "album-6",
+      "location": "",
+      "latitude": null,
+      "longitude": null,
+      "story": "演示照片，用来体验整理、标签与对话。",
+      "taken_at": "2025-06-15",
+      "date_source": "test",
+      "favorite": false,
+      "tags": [
+        "演示素材",
+        "旅途"
+      ]
+    },
+    {
+      "id": "photo-19",
+      "file": "photos/19.jpg",
+      "name": "19-拾光-48.jpg",
+      "album_id": "album-7",
+      "location": "",
+      "latitude": null,
+      "longitude": null,
+      "story": "演示照片，用来体验整理、标签与对话。",
+      "taken_at": "2023-07-15",
+      "date_source": "test",
+      "favorite": true,
+      "tags": [
+        "演示素材",
+        "旅途"
+      ]
+    },
+    {
+      "id": "photo-20",
+      "file": "photos/20.jpg",
+      "name": "20-拾光-49.jpg",
+      "album_id": "album-7",
+      "location": "",
+      "latitude": null,
+      "longitude": null,
+      "story": "演示照片，用来体验整理、标签与对话。",
+      "taken_at": "2024-08-15",
+      "date_source": "test",
+      "favorite": false,
+      "tags": [
+        "演示素材",
+        "旅途"
+      ]
+    },
+    {
+      "id": "photo-21",
+      "file": "photos/21.jpg",
+      "name": "21-拾光-50.jpg",
+      "album_id": "album-7",
+      "location": "",
+      "latitude": null,
+      "longitude": null,
+      "story": "演示照片，用来体验整理、标签与对话。",
+      "taken_at": "2025-09-15",
+      "date_source": "test",
+      "favorite": false,
+      "tags": [
+        "演示素材",
+        "旅途"
+      ]
+    },
+    {
+      "id": "photo-22",
+      "file": "photos/22.jpg",
+      "name": "22-拾光-51.jpg",
+      "album_id": "album-11",
+      "location": "",
+      "latitude": null,
+      "longitude": null,
+      "story": "演示照片，用来体验整理、标签与对话。",
+      "taken_at": "2023-10-15",
+      "date_source": "test",
+      "favorite": false,
+      "tags": [
+        "演示素材",
+        "旅途"
+      ]
+    },
+    {
+      "id": "photo-23",
+      "file": "photos/23.jpg",
+      "name": "23-拾光-52.jpg",
+      "album_id": "album-11",
+      "location": "",
+      "latitude": null,
+      "longitude": null,
+      "story": "演示照片，用来体验整理、标签与对话。",
+      "taken_at": "2024-11-15",
+      "date_source": "test",
+      "favorite": false,
+      "tags": [
+        "演示素材",
+        "旅途"
+      ]
+    },
+    {
+      "id": "photo-24",
+      "file": "photos/24.jpg",
+      "name": "24-拾光-53.jpg",
+      "album_id": "album-11",
+      "location": "",
+      "latitude": null,
+      "longitude": null,
+      "story": "演示照片，用来体验整理、标签与对话。",
+      "taken_at": "2025-12-15",
+      "date_source": "test",
+      "favorite": false,
+      "tags": [
+        "演示素材",
+        "旅途"
+      ]
+    }
+  ],
+  "music": [
+    {
+      "name": "拾光四音 · 原创测试音",
+      "mime": "audio/wav",
+      "file": "music/memory-chime.wav"
+    }
+  ],
+  "tag_colors": [
+    {
+      "name": "演示素材",
+      "color": "#b8c7ab"
+    },
+    {
+      "name": "旅途",
+      "color": "#d6b28c"
+    }
+  ]
+}

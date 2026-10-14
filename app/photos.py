@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 from io import BytesIO
 import hashlib
+import json
 import logging
 import sqlite3
 import threading
@@ -15,9 +16,14 @@ from .encoder import normalize
 
 LOG = logging.getLogger('aibum')
 MAX_BYTES = 20 * 1024 * 1024
+TAG_COLORS = ['#8AB0D8','#649552','#F2A082','#F4B842','#B29AD8','#5AB8B8','#B0BCC8']
+
+
+def tag_color_value(name, color=None):
+    return color.upper() if color and color.upper() in TAG_COLORS else TAG_COLORS[sum(map(ord,name)) % len(TAG_COLORS)]
 MAX_PIXELS = 40_000_000
 PUBLIC_COLUMNS = ('id', 'album_id', 'name', 'mime', 'size', 'width', 'height', 'created_at',
-                  'taken_at', 'camera', 'location', 'favorite', 'status', 'error', 'story', 'trashed_at')
+                  'taken_at', 'camera', 'location', 'favorite', 'status', 'error', 'story', 'trashed_at', 'latitude', 'longitude', 'date_source')
 
 
 def now():
@@ -61,6 +67,9 @@ def photo_dict(db, row):
     result['favorite'] = bool(result['favorite'])
     result['tags'] = [dict(t) for t in db.execute(
         'SELECT name,kind,source,score FROM photo_tags WHERE photo_id=? ORDER BY source DESC,name', (row['id'],))]
+    for tag in result['tags']:
+        color = db.execute('SELECT color FROM tag_colors WHERE owner_id=? AND name=?',(row['owner_id'],tag['name'])).fetchone()
+        tag['color'] = tag_color_value(tag['name'], color[0] if color else None)
     result['thumbnail_url'] = f'/api/photos/{row["id"]}/file?thumbnail=true'
     result['original_url'] = f'/api/photos/{row["id"]}/file'
     return result
@@ -83,6 +92,18 @@ def save_photo(database, user, filename, data, album_id=None):
     with database.connect() as db:
         check_album(db, album_id, user)
     image, mime, taken, camera = decode_image(data)
+    latitude = longitude = None
+    try:
+        with Image.open(BytesIO(data)) as source:
+            gps = source.getexif().get_ifd(34853)
+            def coordinate(key, ref, negative):
+                values = gps[key]
+                result = float(values[0])+float(values[1])/60+float(values[2])/3600
+                return -result if str(gps.get(ref)) == negative else result
+            latitude, longitude = coordinate(2,1,'S'), coordinate(4,3,'W')
+            if not (-90 <= latitude <= 90 and -180 <= longitude <= 180): latitude = longitude = None
+    except (KeyError, TypeError, ValueError, ZeroDivisionError, OSError):
+        latitude = longitude = None
     digest = hashlib.sha256(data).hexdigest()
     photo_id = uuid.uuid4().hex
     original, thumb = database.original(photo_id), database.thumbnail(photo_id)
@@ -110,6 +131,7 @@ def save_photo(database, user, filename, data, album_id=None):
                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?)''',
                 (photo_id, user, album_id, filename[:200] or '未命名照片', digest, mime,
                  len(data), width, height, now(), taken, camera))
+            db.execute('UPDATE photos SET date_source=?,latitude=?,longitude=? WHERE id=?', ('exif' if taken else 'upload',latitude,longitude,photo_id))
             result = photo_dict(db, owned(db, photo_id, user))
         LOG.info('action=upload user=%s photo=%s rows=1', user, photo_id)
         return result, False
@@ -126,13 +148,79 @@ def save_photo(database, user, filename, data, album_id=None):
         raise
 
 
-def filters(user, tag='', album_id='', favorite=False, location='', start=None, end=None, tags=None, trash=False):
+def semantic_resolver(database, encoder, user):
+    cache = {}
+    def resolve(text, score):
+        key = (text, score)
+        if key not in cache:
+            if len(cache) >= 8:
+                raise HTTPException(422, '一个拼图最多包含 8 个语义搜索条件')
+            vector = normalize(encoder.text(text))
+            with database.connect() as db:
+                rows = db.execute("SELECT id,embedding FROM photos WHERE owner_id=? AND status='ready' AND model_id=?",
+                                  (user, encoder.model_id)).fetchall()
+            cache[key] = [r['id'] for r in rows if float(np.frombuffer(r['embedding'], dtype=np.float32) @ vector) >= score]
+        return cache[key]
+    return resolve
+
+
+def tag_expression_sql(raw, resolve_search=None):
+    if len(raw) > 12000:
+        raise HTTPException(422, '标签拼图过大')
+    try:
+        tree = json.loads(raw)
+    except (ValueError, RecursionError):
+        raise HTTPException(422, '无效的标签拼图')
+    count = 0
+    def visit(node, depth=0):
+        nonlocal count
+        count += 1
+        if count > 63 or depth > 32 or not isinstance(node, dict):
+            raise HTTPException(422, '条件拼图最多 63 个节点、32 层分组')
+        if set(node) == {'tag'} and isinstance(node['tag'], str) and 0 < len(node['tag']) <= 30:
+            return 'EXISTS (SELECT 1 FROM photo_tags tx WHERE tx.photo_id=p.id AND tx.name=?)', [node['tag']]
+        if 'op' in node and not isinstance(node['op'], str):
+            raise HTTPException(422, '无效的运算符')
+        if 'field' in node and not isinstance(node['field'], str):
+            raise HTTPException(422, '无效的条件类型')
+        if set(node) == {'op', 'child'} and node['op'] == 'not':
+            child, params = visit(node['child'], depth+1)
+            return f'(NOT ({child}))', params
+        if set(node) <= {'field', 'value', 'score'} and 'field' in node and 'value' in node:
+            field, value = node['field'], node['value']
+            if field in {'favorite', 'unlocated'} and type(value) is bool:
+                column = 'p.favorite=1' if field == 'favorite' else '(p.latitude IS NULL OR p.longitude IS NULL)'
+                return (f'({column})' if value else f'(NOT ({column}))'), []
+            if field in {'name', 'story', 'location'} and isinstance(value, str) and 0 < len(value) <= 200:
+                return f'instr(lower(COALESCE(p.{field},\'\')),lower(?))>0', [value]
+            if field == 'place' and isinstance(value, list) and len(value) == 2:
+                if all(type(v) in {int, float} and np.isfinite(v) for v in value) and -90 <= value[0] <= 90 and -180 <= value[1] <= 180:
+                    return 'COALESCE((abs(p.latitude-?)<0.00002 AND abs(p.longitude-?)<0.00002),0)', value
+            if field == 'search' and isinstance(value, str) and 0 < len(value) <= 500:
+                score = node.get('score', .30)
+                if type(score) not in {int, float} or not np.isfinite(score) or not -1 <= score <= 1 or resolve_search is None:
+                    raise HTTPException(422, '无效的语义搜索条件')
+                ids = resolve_search(value, score)
+                return ('p.id IN ('+','.join('?' for _ in ids)+')', ids) if ids else ('0', [])
+            raise HTTPException(422, '无效的条件值')
+        if set(node) != {'op','left','right'} or node['op'] not in {'union','intersect','subtract'}:
+            raise HTTPException(422, '无效的标签运算')
+        left, lv = visit(node['left'], depth+1); right, rv = visit(node['right'], depth+1)
+        operator = {'union':'OR','intersect':'AND','subtract':'AND NOT'}[node['op']]
+        return f'({left} {operator} {right})', lv+rv
+    return visit(tree)
+
+
+def filters(user, tag='', album_id='', favorite=False, location='', start=None, end=None, tags=None, trash=False, tag_expr='', resolve_search=None):
     clauses = ["p.owner_id=?", "p.status!='deleting'", "p.trashed_at IS NOT NULL" if trash else "p.trashed_at IS NULL"]
     values = [user]
     if tag:
         clauses.append('EXISTS (SELECT 1 FROM photo_tags t WHERE t.photo_id=p.id AND t.name=?)')
         values.append(tag)
-    if tags:
+    if tag_expr:
+        expression, params = tag_expression_sql(tag_expr, resolve_search)
+        clauses.append(expression); values.extend(params)
+    elif tags:
         # Multiple checked tags mean any selected tag, like faceted library search.
         clauses.append('EXISTS (SELECT 1 FROM photo_tags t WHERE t.photo_id=p.id AND t.name IN ('
                        + ','.join('?' for _ in tags) + '))')
@@ -164,7 +252,7 @@ MATCHING_RULES = {
 
 def rank(database, encoder, user, vector, limit=30, min_score=None, exclude=None,
          mode='text', strictness='balanced', **kwargs):
-    where, values = filters(user, **kwargs)
+    where, values = filters(user, resolve_search=semantic_resolver(database, encoder, user), **kwargs)
     with database.connect() as db:
         # shortcut: exact scan is the baseline; switch to ANN after measuring a larger library.
         rows = db.execute(f'''SELECT p.* FROM photos p WHERE {where} AND p.status='ready'

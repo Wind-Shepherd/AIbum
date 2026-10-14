@@ -23,6 +23,7 @@ function showAuth() {
   state.tags.clear(); state.tagOptions = []; state.users = []; clearReference();
   if (typeof resetMemoryState === 'function') resetMemoryState();
   if (typeof resetMusic === 'function') resetMusic();
+  document.querySelectorAll('dialog[open]').forEach(dialog=>dialog.close()); if(typeof resetChapter==='function')resetChapter();
   $('detail').close(); $('detail-image').removeAttribute('src'); $('grid').replaceChildren();
   $('security').close(); $('admin-users').replaceChildren(); $('admin-workspace').hidden = true;
   $('security-button').disabled = false;
@@ -44,15 +45,15 @@ async function showWorkspace(user) {
     if (typeof resetMusic === 'function') resetMusic();
     if (!user.is_admin) { showAuth(); $('auth-error').textContent = '请使用管理员账号登录'; return; }
     $('workspace').hidden = true; $('admin-workspace').hidden = false; $('admin-button').hidden = true;
-    await loadUsers(); return;
+    await loadUsers(); if(typeof loadCommunity==='function')await loadCommunity(); return;
   }
   await refreshOptions(); await loadPhotos(); await updateHealth();
-  if (typeof loadMusic === 'function') await loadMusic();
+  if (typeof loadMusic === 'function') await loadMusic(); if(typeof loadCommunity==='function')await loadCommunity();
 }
 $('auth-toggle').onclick = () => { state.register = !state.register; $('auth-title').textContent = state.register ? '创建你的相册' : '登录你的相册'; $('auth-submit').textContent = state.register ? '创建账户' : '登录'; $('auth-toggle').textContent = state.register ? '已有账户？返回登录' : '还没有账户？创建一个'; $('auth-password').autocomplete = state.register ? 'new-password' : 'current-password'; $('auth-error').textContent = ''; };
 $('auth-form').onsubmit = async event => {
   event.preventDefault(); $('auth-submit').disabled = true; $('auth-error').textContent = '';
-  try { const endpoint = adminPortal ? '/admin/login' : '/auth/' + (state.register ? 'register' : 'login'); const user = await api(endpoint, json('POST', {username: $('auth-name').value, password: $('auth-password').value})); if (user.is_admin && !adminPortal) { location.assign('/admin'); return; } await showWorkspace(user); if (user.recovery_code) showRecovery(user.recovery_code); }
+  try { const endpoint = adminPortal ? '/admin/login' : '/auth/' + (state.register ? 'register' : 'login'); const user = await api(endpoint, json('POST', {username: $('auth-name').value, password: $('auth-password').value})); await showWorkspace(user); if (user.recovery_code) showRecovery(user.recovery_code); }
   catch (error) { $('auth-error').textContent = error.message; }
   finally { $('auth-submit').disabled = false; }
 };
@@ -69,31 +70,15 @@ async function refreshOptions() {
   fillSelect('detail-album', albums, '未归入相册'); state.tagOptions = tags; renderTagOptions();
   if (typeof updateFolders === 'function') updateFolders(albums);
 }
-function renderTagOptions() {
-  const keyword = $('tag-keyword').value.trim().toLowerCase(); $('tag-options').replaceChildren();
-  const options = state.tagOptions.filter(t => t.name.toLowerCase().includes(keyword));
-  options.forEach(tag => {
-    const label = document.createElement('label'); label.className = 'tag-option';
-    const check = document.createElement('input'); check.type = 'checkbox'; check.checked = state.tags.has(tag.name);
-    const name = document.createElement('span'); name.textContent = tag.name;
-    const count = document.createElement('span'); count.className = 'tag-count'; count.textContent = `(${tag.count})`;
-    check.onchange = guard(async () => {
-      if (check.checked && state.tags.size >= 30) { check.checked = false; throw new Error('最多选择 30 个标签'); }
-      check.checked ? state.tags.add(tag.name) : state.tags.delete(tag.name); await applyFilters();
-    });
-    label.append(check, name, count); $('tag-options').append(label);
-  });
-  if (!options.length) { const empty = document.createElement('p'); empty.className = 'muted'; empty.textContent = '暂无匹配标签'; $('tag-options').append(empty); }
-}
-$('tag-keyword').oninput = renderTagOptions;
-$('clear-tags').onclick = guard(async () => { state.tags.clear(); renderTagOptions(); await applyFilters(); });
-function resetFilters() { state.tags.clear(); ['album-filter','location-filter','start-filter','end-filter','tag-keyword'].forEach(id => $(id).value = ''); $('favorite-filter').checked = false; $('order').value = 'newest'; renderTagOptions(); }
+$('tag-keyword').oninput = () => renderTagOptions();
+$('clear-tags').onclick = guard(async () => { state.tags.clear(); if(typeof resetTagLogic==='function')resetTagLogic(); renderTagOptions(); await applyFilters(); });
+function resetFilters() { state.tags.clear(); if(typeof resetTagLogic==='function')resetTagLogic(); ['album-filter','location-filter','start-filter','end-filter','tag-keyword'].forEach(id => $(id).value = ''); $('favorite-filter').checked = false; $('order').value = 'newest'; renderTagOptions(); }
 $('clear-filters').onclick = guard(async () => { resetFilters(); await applyFilters(); });
 function appendFilters(target) {
-  for (const key of ['album_id','location','start','end','favorite','tags']) target.delete(key);
+  for (const key of ['album_id','location','start','end','favorite','tags','tag_expr']) target.delete(key);
   for (const [key,value] of Object.entries(filterValues())) if (value) target.set(key,value);
   if (typeof collectionView !== 'undefined' && collectionView === 'favorites') target.set('favorite','true');
-  for (const tag of state.tags) target.append('tags',tag);
+  if(typeof tagLogic!=='undefined'&&tagLogic)target.set('tag_expr',JSON.stringify(tagLogic)); else for (const tag of state.tags) target.append('tags',tag);
 }
 function filterValues() {
   if ($('start-filter').value && $('end-filter').value && $('start-filter').value > $('end-filter').value) throw new Error('开始日期不能晚于结束日期');
@@ -143,7 +128,7 @@ function render() {
     const title = document.createElement('p'); title.className = 'card-title'; title.textContent = (photo.favorite ? '★ ' : '') + photo.name; title.title = photo.name;
     const subtitle = document.createElement('p'); subtitle.className = 'card-subtitle'; subtitle.textContent = photo.score !== undefined ? `相似度 ${photo.score.toFixed(3)}` : `${(photo.taken_at || photo.created_at).slice(0,10)} · ${photo.taken_at ? '拍摄于' : '上传于'} · ${statusName(photo.status)}`;
     const tags = document.createElement('div'); tags.className = 'tags';
-    photo.tags.slice(0,3).forEach(t => { const tag = document.createElement('span'); tag.className = 'tag'; tag.textContent = t.name; tags.append(tag); });
+    photo.tags.forEach(t => { const tag = document.createElement('span'); tag.className = 'tag'; tag.textContent = t.name; tag.style.backgroundColor=t.color||'#cfb58f'; tags.append(tag); });
     body.append(title, subtitle, tags); card.append(check, open, body); stage.append(card); $('grid').append(stage);
   }); updateSelection();
   if (collectionView === 'folders' && $('folder-grid').children.length) $('empty').hidden = true;
@@ -166,15 +151,15 @@ function selectSearchMode(mode) {
   searchMode = mode;
   document.querySelectorAll('[data-search-mode]').forEach(button => button.setAttribute('aria-pressed',String(button.dataset.searchMode === mode)));
   $('text-search-input').hidden = mode !== 'text'; $('reference-drop').hidden = mode !== 'image';
-  $('match-range').value = mode === 'text' ? '0.30' : '0.72';
-  $('match-value').value = Number($('match-range').value).toFixed(2);
+  $('match-range').value = '1';
+  $('match-value').value = ['宽松','均衡','严格'][Number($('match-range').value)];
 }
 document.querySelectorAll('[data-search-mode]').forEach(button => button.onclick = () => selectSearchMode(button.dataset.searchMode));
-$('match-range').oninput = () => $('match-value').value = Number($('match-range').value).toFixed(2);
+$('match-range').oninput = () => $('match-value').value = ['宽松','均衡','严格'][Number($('match-range').value)];
 $('match-range').onchange = guard(async () => { if (state.mode !== 'browse') await applyFilters(); });
 function clearReference() {
   if (state.referenceUrl) URL.revokeObjectURL(state.referenceUrl);
-  state.referenceFile = null; state.referenceUrl = null; $('reference').value = '';
+  state.referenceFile = null; state.referenceUrl = null; state.similarId=null; $('reference').value = '';
   $('reference-info').hidden = true; $('reference-preview').removeAttribute('src'); $('drop-prompt').hidden = false;
 }
 function setReference(file) {
@@ -203,9 +188,9 @@ async function runSearch(reuse = false) {
   if (reuse && state.query) { for (const [key,value] of state.query.entries()) form.append(key,value); }
   else {
     if (searchMode === 'text') { if (!$('query').value.trim()) throw new Error('请先描述想找的照片'); form.set('text',$('query').value.trim()); }
-    else { if (!state.referenceFile) throw new Error('请先放入一张参考图'); form.set('image',state.referenceFile); }
+    else { if(!state.referenceFile&&state.similarId)return runSimilar(state.similarId); if (!state.referenceFile) throw new Error('请先放入一张参考图'); form.set('image',state.referenceFile); }
   }
-  appendFilters(form); form.set('min_score',$('match-range').value); form.set('limit','100');
+  appendFilters(form); form.delete('min_score'); form.set('strictness',['broad','balanced','strict'][Number($('match-range').value)]); form.set('limit','100');
   $('search-button').disabled = true; $('search-button').textContent = '检索中…';
   try { const data = await api('/search', {method: 'POST', body: form}); if (version !== resultVersion) return; state.items = data.items; state.mode = 'search'; state.query = form; state.similarId = null; showSearchResult(data, data.mode === 'text' ? '文搜图' : '图搜图'); }
   finally { $('search-button').disabled = false; $('search-button').textContent = '搜索'; }
@@ -217,7 +202,7 @@ function showSearchResult(data, title) {
 }
 async function runSimilar(id) {
   if (searchMode !== 'image') selectSearchMode('image');
-  const version = ++resultVersion; const params = new URLSearchParams({min_score:$('match-range').value,limit:'100'}); appendFilters(params);
+  const version = ++resultVersion; const params = new URLSearchParams({strictness:['broad','balanced','strict'][Number($('match-range').value)],limit:'100'}); appendFilters(params);
   const data = await api('/photos/' + id + '/similar?' + params);
   if (version !== resultVersion) return; state.items = data.items; state.mode = 'similar'; state.similarId = id; showSearchResult(data,'相似照片（含参考图）');
 }
@@ -230,21 +215,6 @@ function uploadOne(file, album, progress) {
     xhr.onerror = () => reject(new Error('网络错误')); const form = new FormData(); form.set('file',file); if (album) form.set('album_id',album); xhr.send(form);
   });
 }
-$('upload').onchange = guard(async () => {
-  const files = [...$('upload').files]; if (!files.length) return;
-  const owner = state.user?.id, album = $('album-filter').value;
-  $('upload').disabled = true; $('upload-progress').hidden = false; let ok = 0, duplicate = 0; const errors = [];
-  $('logout').disabled = true; $('security-button').disabled = true;
-  try {
-    for (let i=0; i<files.length; i++) {
-      if (state.user?.id !== owner) break;
-      $('upload-label').textContent = `上传 ${i+1}/${files.length}：${files[i].name}`;
-      try { if (files[i].size > 20*1024*1024) throw new Error('超过 20 MiB'); const result = await uploadOne(files[i],album,fraction => $('progress').value = (i+fraction)/files.length*100); ok++; if (result.duplicate) duplicate++; }
-      catch(error) { errors.push(files[i].name + '：' + error.message); }
-    }
-    if (state.user?.id === owner) { await refreshOptions(); await loadPhotos(); await updateHealth(); notice(`完成 ${ok}/${files.length} 张，重复 ${duplicate} 张。${errors.slice(0,3).join('；')}`); }
-  } finally { $('upload').value = ''; $('upload').disabled = false; $('logout').disabled = false; $('security-button').disabled = false; $('upload-progress').hidden = true; }
-});
 async function batch(action, body) {
   if (state.busy || !state.selected.size) return;
   if (action === 'DELETE' && !confirm(`将所选 ${state.selected.size} 张照片移入回收站？可以随时恢复。`)) return;
@@ -258,36 +228,35 @@ $('batch-move').onclick = guard(() => batch('PATCH', {album_id: $('batch-album')
 $('batch-delete').onclick = guard(() => batch('DELETE'));
 $('batch-download').onclick = guard(async () => {
   if (!state.selected.size || $('batch-download').disabled) return;
-  const version=accountVersion,button=$('batch-download');button.disabled=true;
+  const version=accountVersion,button=$('batch-download'),ids=[...state.selected];state.busy=true;updateSelection();
   try {
-    const response=await fetch('/api/photos/download',{method:'POST',headers:{'X-AIbum-Request':'1','Content-Type':'application/json'},body:JSON.stringify({photo_ids:[...state.selected]})});
+    const response=await fetch('/api/photos/download',{method:'POST',headers:{'X-AIbum-Request':'1','Content-Type':'application/json'},body:JSON.stringify({photo_ids:ids})});
     if(version!==accountVersion)throw new Error('账户状态已更新，请重新选择照片');
     if(!response.ok){const error=await response.json().catch(()=>({}));if(response.status===401&&state.user)showAuth();throw new Error(error.detail||`下载失败 (${response.status})`);}
-    const url=URL.createObjectURL(await response.blob()),link=document.createElement('a');link.href=url;link.download='aibum-photos.zip';document.body.append(link);link.click();link.remove();setTimeout(()=>URL.revokeObjectURL(url),30000);notice(`已打包下载 ${state.selected.size} 张照片`);
-  } finally {button.disabled=false;}
+    const blob=await response.blob(); if(version!==accountVersion)throw new Error('账户已变更，下载已停止'); const url=URL.createObjectURL(blob),link=document.createElement('a');link.href=url;link.download='aibum-photos.zip';document.body.append(link);link.click();link.remove();setTimeout(()=>URL.revokeObjectURL(url),30000);notice(`已打包下载 ${ids.length} 张照片`);
+  } finally {state.busy=false;updateSelection();}
 });
 async function openDetail(id) {
   const photo = await api('/photos/' + id); state.detail = photo;
   prepareStoryDetail(photo);
   $('detail-image').src = photo.original_url; $('detail-image').alt = photo.name;
   $('detail-name').value = photo.name; $('detail-location').value = photo.location; $('detail-album').value = photo.album_id || '';
-  $('detail-tags').value = photo.tags.map(t => t.name).join(', '); $('detail-favorite').checked = photo.favorite;
+  $('detail-tags').value = photo.tags.map(t => t.name).join(', '); if(typeof prepareDetailExtras==='function')prepareDetailExtras(photo); $('detail-favorite').checked = photo.favorite;
   $('detail-meta').textContent = `${photo.width} × ${photo.height} · ${(photo.size/1024/1024).toFixed(2)} MiB · ${photo.camera || '无相机信息'}`;
   $('detail-auto').textContent = photo.tags.filter(t => t.source === 'auto').map(t => `${t.name}：${t.score.toFixed(3)}`).join(' / ') + '（推荐分数不是概率；修改标签后保存为人工标签）';
   $('detail-state').textContent = photo.trashed_at ? '已在回收站，恢复后可修改资料。' : photo.error || statusName(photo.status); $('detail-similar').disabled = !!photo.trashed_at || photo.status !== 'ready'; $('detail-retry').disabled = !!photo.trashed_at || !['ready','failed'].includes(photo.status);
-  $('detail-download').href = photo.original_url + '?download=true'; $('detail').showModal();
+  $('detail-download').href = '#'; $('detail-download').onclick=guard(async event=>{event.preventDefault();await downloadArchive({photo_ids:[photo.id]});}); $('detail').showModal();
 }
 $('close-detail').onclick = () => closeStoryDetail();
 $('detail-form').onsubmit = guard(async event => {
   event.preventDefault(); const photo = state.detail;
   const body = {name: $('detail-name').value, location: $('detail-location').value, album_id: $('detail-album').value || null, favorite: $('detail-favorite').checked, story:$('detail-story').value};
   if ($('detail-date').value !== (photo.taken_at || '').slice(0,10)) body.taken_at = $('detail-date').value || null;
-  const tags = $('detail-tags').value.split(/[,，]/).map(t => t.trim()).filter(Boolean);
-  if (JSON.stringify(tags) !== JSON.stringify(photo.tags.map(t => t.name))) body.tags = tags;
+  await saveDetailExtras(body);
   await api('/photos/' + photo.id, json('PATCH', body)); $('detail').close(); await refreshOptions(); await reload(); notice('修改已保存');
 });
 $('detail-retry').onclick = guard(async () => { if (storyDirty() && !confirm('故事或日期尚未保存，确定放弃修改并重新分析？')) return; await api('/photos/' + state.detail.id + '/retry', {method: 'POST'}); $('detail').close(); await reload(); notice('已加入分析队列'); });
-$('detail-similar').onclick = guard(async () => { if (storyDirty() && !confirm('故事或日期尚未保存，确定放弃修改并查找相似照片？')) return; await runSimilar(state.detail.id); $('detail').close(); });
+$('detail-similar').onclick = guard(async () => { if (storyDirty() && !confirm('故事或日期尚未保存，确定放弃修改并查找相似照片？')) return; selectSearchMode('image'); if(state.referenceUrl)URL.revokeObjectURL(state.referenceUrl);state.referenceUrl=null;state.referenceFile=null;state.similarId=state.detail.id;$('reference-preview').src=state.detail.thumbnail_url;$('reference-name').textContent=state.detail.name;$('reference-info').hidden=false;$('drop-prompt').hidden=true; await runSimilar(state.detail.id); $('detail').close(); });
 async function updateHealth() {
   if (!state.user || adminPortal) return;
   const health = await api('/health'); const counts = health.photos;
@@ -307,7 +276,7 @@ let avatarFile = null, avatarPreview = null, avatarBusy = false;
 function renderProfile() {
   if (!state.user) return;
   const name = state.user.nickname || state.user.username;
-  $('username').textContent = name; $('profile-display-name').textContent = name;
+  $('username').textContent = name; if($('menu-nickname'))$('menu-nickname').textContent=name; $('profile-display-name').textContent = name;
   $('profile-account').value = state.user.username; $('profile-nickname').value = state.user.nickname || '';
   $('profile-member-since').textContent = state.user.created_at ? `从 ${state.user.created_at.slice(0,10)} 开始收藏` : '你的私人记忆档案';
   for (const prefix of ['header','profile']) {

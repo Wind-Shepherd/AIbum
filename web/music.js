@@ -43,10 +43,10 @@ function updateMusicState() {
   const playing = !musicAudio.paused && !!musicAudio.src;
   $('music-play-disc').classList.toggle('playing', playing);
   $('music-tonearm').classList.toggle('playing', playing);
-  $('music-play').textContent = playing ? '暂停' : '播放';
+  const icon=playing?'M7 5h3v14H7zM14 5h3v14h-3z':'M8 5l11 7-11 7z';for(const id of ['music-play','music-menu-subtitle']){const host=$(id);host.replaceChildren();const svg=document.createElementNS('http://www.w3.org/2000/svg','svg');svg.setAttribute('viewBox','0 0 24 24');svg.setAttribute('aria-hidden','true');svg.classList.add('playback-icon');const path=document.createElementNS(svg.namespaceURI,'path');path.setAttribute('d',icon);svg.append(path);host.append(svg);host.setAttribute('aria-label',playing?'暂停音乐':'播放音乐');} $('music-play').title=playing?'暂停':'播放';
   $('music-play-disc').setAttribute('aria-label', playing ? '暂停音乐' : '播放音乐');
   $('music-menu-title').textContent = musicTracks[musicIndex]?.name || '拾光唱片';
-  $('music-menu-subtitle').textContent = `${playing ? '正在播放' : '已暂停'} · 点此打开歌单`;
+
 }
 async function playMusic(index) {
   if (!musicTracks.length) { notice('请点唱片旁的文字，打开歌单并添加歌曲'); return; }
@@ -75,12 +75,12 @@ $('music-next').onclick = guard(() => playMusic((musicIndex + 1) % musicTracks.l
 $('music-volume').oninput = () => { musicAudio.volume = Number($('music-volume').value); };
 musicAudio.onplay = updateMusicState; musicAudio.onpause = updateMusicState;
 musicAudio.onended = () => { if (musicTracks.length) playMusic((musicIndex + 1) % musicTracks.length).catch(error => notice(error.message)); };
-musicAudio.onerror = () => notice('这首歌曲无法播放，请检查文件格式');
+musicAudio.onerror = () => { musicAudio.pause(); updateMusicState(); notice('这首歌曲无法播放，请检查文件格式'); };
 
 async function uploadMusicFiles(files) {
   const audioFiles = [...files].filter(file => file.type.startsWith('audio/') || /\.(mp3|wav|ogg)$/i.test(file.name));
   if (!audioFiles.length) { notice('请拖入 MP3、WAV 或 OGG 音频'); return; }
-  const input = $('music-upload'); input.disabled = true; let done = 0; const errors = [];
+  const input = $('music-upload'); if (input.disabled) return; input.disabled = true; let done = 0; const errors = [];
   try {
     for (const file of audioFiles) {
       if (file.size > 15 * 1024 * 1024) { errors.push(file.name + ' 超过 15 MiB'); continue; }
@@ -101,3 +101,7 @@ musicDrop.ondrop = guard(event => {
   event.preventDefault(); musicDrop.classList.remove('dragging');
   return uploadMusicFiles(event.dataTransfer.files);
 });
+
+function updateMusicProgress(){const valid=Number.isFinite(musicAudio.duration)&&musicAudio.duration>0;$('music-seek').disabled=!valid;$('music-seek').value=valid?String(musicAudio.currentTime/musicAudio.duration*1000):'0';}
+musicAudio.addEventListener('timeupdate',updateMusicProgress);musicAudio.addEventListener('loadedmetadata',updateMusicProgress);musicAudio.addEventListener('emptied',updateMusicProgress);
+$('music-seek').oninput=()=>{if(Number.isFinite(musicAudio.duration))musicAudio.currentTime=Number($('music-seek').value)/1000*musicAudio.duration;};

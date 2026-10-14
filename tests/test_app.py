@@ -340,7 +340,9 @@ def test_admin_suspend_revokes_sessions(env):
         target = signup(bob, 'bob')
         assert admin.patch('/api/admin/users/' + target['id'], json={'active': False}).status_code == 200
         assert bob.get('/api/auth/me').status_code == 401
-        assert bob.post('/api/auth/login', json={'username': 'bob', 'password': PASSWORD}).status_code == 401
+        disabled = bob.post('/api/auth/login', json={'username': 'bob', 'password': PASSWORD})
+        assert disabled.status_code == 403 and '已被停用' in disabled.json()['detail']
+        assert bob.post('/api/auth/login', json={'username': 'bob', 'password': 'wrong-password'}).status_code == 401
         assert admin.patch('/api/admin/users/' + user['id'], json={'active': False}).status_code == 409
         assert admin.patch('/api/admin/users/' + target['id'], json={'active': True}).status_code == 200
         assert bob.post('/api/auth/login', json={'username': 'bob', 'password': PASSWORD}).status_code == 200
@@ -412,3 +414,18 @@ def test_folders_stories_trash_and_random(env):
 
 def upload_duplicate_status(client):
     return client.post('/api/photos',files={'file':('same.png',picture(),'image/png')}).status_code
+
+def test_batch_download_is_private_and_preserves_originals(env):
+    import zipfile
+    app, client = env
+    signup(client)
+    photo = upload(client)['photo']
+    response = client.post('/api/photos/download', json={'photo_ids':[photo['id'],photo['id']]})
+    assert response.status_code == 200
+    with zipfile.ZipFile(BytesIO(response.content)) as archive:
+        assert len(archive.namelist()) == 1
+        assert archive.read(archive.namelist()[0]) == picture()
+    client.post('/api/auth/logout')
+    signup(client, 'archive_other')
+    assert client.post('/api/photos/download', json={'photo_ids':[photo['id']]}).status_code == 404
+    assert client.post('/api/photos/download', json={'photo_ids':[]}).status_code == 422

@@ -6,6 +6,7 @@ models/
 tmp/
 *.log
 .env
+config/ai.local.json
 /*.doc
 /*.zip
 docs/需求原文.txt

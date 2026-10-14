@@ -1,0 +1,16 @@
+const assert=require('node:assert/strict');
+const C=require('../web/condition-core.js');
+const tree=C.parse('(标签("城市") ∪ 地点("北京")) − (收藏 ∩ ¬故事("海风"))');
+assert.equal(tree.op,'subtract');assert.equal(tree.left.right.field,'location');assert.equal(tree.right.right.op,'not');
+assert.deepEqual(C.parse(C.format(tree)),tree);
+const wide=Array.from({length:32},(_,i)=>({tag:'标签'+i})).reduce((left,right)=>left?{op:'union',left,right}:right,null);
+assert.deepEqual(C.parse(C.format(wide)),wide);
+assert.deepEqual(C.parse('位置(-30.25,120.3)'),{field:'place',value:[-30.25,120.3]});
+assert.deepEqual(C.parse('搜索("cat",0.3)'),{field:'search',value:'cat',score:.3});
+assert.equal(C.parse('猫 ∪ 狗 ∩ 收藏').right.op,'intersect');
+assert.throws(()=>C.parse('猫 ∪'));assert.throws(()=>C.parse('未知("x")'));assert.throws(()=>C.parse('猫 狗'));
+const nodes=[{id:'a',value:{tag:'猫'},inputs:[]},{id:'b',value:{field:'favorite',value:true},inputs:[]},{id:'c',value:{op:'subtract'},inputs:['a','b']}];
+assert.deepEqual(C.compile(nodes),{op:'subtract',left:{tag:'猫'},right:{field:'favorite',value:true}});
+assert.throws(()=>C.compile([...nodes,{id:'d',value:{tag:'孤立'},inputs:[]}]),/只保留/);
+nodes[2].inputs[0]='c';assert.throws(()=>C.compile(nodes,'c'),/循环/);
+console.log('Conditions: grammar, precedence, round-trip, coordinates and graph validity passed.');

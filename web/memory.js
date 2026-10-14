@@ -17,9 +17,10 @@ function applyViewVisibility() {
   $('folder-path').hidden = collectionView !== 'folders';
   $('timeline-controls').hidden = collectionView !== 'timeline' || state.mode !== 'browse';
   $('manage-folder').hidden = collectionView !== 'folders' || !$('album-filter').value;
-  for (const id of ['batch-favorite','batch-album','batch-move','batch-delete']) $(id).hidden = trash;
+  for (const id of ['batch-favorite','batch-move','batch-delete']) $(id).hidden = trash;
   for (const id of ['batch-restore','batch-purge']) $(id).hidden = !trash;
-  $('new-album').hidden = trash; $('upload').closest('label').hidden = trash;
+  $('sort-slot').hidden=collectionView==='timeline'; $('batch-album').hidden=true; for(const id of ['folder-download','folder-ai','folder-move'])$(id).hidden=collectionView!=='folders'||!$('album-filter').value;
+  $('new-album').hidden = trash; $('open-import').hidden = trash;
 }
 async function switchCollection(view) {
   collectionView = view; state.mode = 'browse'; state.query = null; state.selected.clear(); timelineSelection = null; timelineRange = null;
@@ -57,7 +58,7 @@ function renderFolders() {
   const ancestors = []; let node = folderList.find(a => a.id === current); const seen = new Set();
   while (node && !seen.has(node.id)) { seen.add(node.id); ancestors.unshift(node); node = folderList.find(a => a.id === node.parent_id); }
   for (const ancestor of ancestors) { const button = document.createElement('button'); button.className='quiet'; button.textContent=' / '+ancestor.name; button.onclick=guard(()=>enterFolder(ancestor.id)); $('folder-breadcrumb').append(button); }
-  folderList.filter(a => (a.parent_id || null) === current).forEach((album,index) => {
+  folderList.filter(a => (a.parent_id || null) === current).sort((a,b)=>$('order').value==='name_desc'?b.name.localeCompare(a.name,'zh-CN'):a.name.localeCompare(b.name,'zh-CN')).forEach((album,index) => {
     const card = document.createElement('article'); card.className = 'album-book';
     const open = document.createElement('button'); open.className = 'book-open'; open.setAttribute('aria-label','打开影集 '+album.name);
     const cover = document.createElement('span'); cover.className = 'book-cover';
@@ -106,7 +107,14 @@ function setCardSize(size) {
   const index = cardSizes.indexOf(size);
   $('display-size').value = String(index + 1);
   $('display-size-label').value = ['密集','缩略','相纸','大幅'][index];
+  const cards = [...document.querySelectorAll('#grid .card-stage,#folder-grid .album-book')];
+  const previous = cards.map(card => card.getBoundingClientRect());
   document.body.dataset.cardSize = size;
+  if (document.body.dataset.motion!=='gentle'&&!matchMedia('(prefers-reduced-motion: reduce)').matches) cards.forEach((card,i) => {
+    const next = card.getBoundingClientRect(), old = previous[i];
+    card.getAnimations().forEach(animation => animation.cancel());
+    card.animate([{transform:`translate(${old.left-next.left}px,${old.top-next.top}px) scale(${old.width/Math.max(next.width,1)})`,opacity:.55},{transform:'none',opacity:1}],{duration:size==='dense'?280:420,delay:Math.min(i,12)*8,easing:'cubic-bezier(.2,.75,.25,1)'});
+  });
   try { localStorage.setItem('aibum-card-size',size); } catch {}
 }
 $('display-size').oninput = () => setCardSize(cardSizes[Number($('display-size').value)-1]);
@@ -186,20 +194,21 @@ function prepareStoryDetail(photo) {
   $('detail-story').value=photo.story||''; $('detail-date').value=(photo.taken_at||'').slice(0,10);
   $('story-handwriting').textContent=photo.story||'这一页，还等着你落笔。'; $('story-date').textContent=(photo.taken_at||photo.created_at).slice(0,10);
   $('detail-date-source').textContent=photo.taken_at?'时光轴按拍摄日期排列，可手动修正。':'缺少拍摄日期，时光轴暂使用上传日期。';
-  $('story-flip').classList.remove('flipped');$('story-handwriting').classList.remove('readable'); $('flip-story').textContent='翻到背面 ↻'; $('readable-story').textContent='清晰阅读';
+  $('story-flip').classList.remove('flipped');$('story-handwriting').classList.remove('readable'); $('flip-story').textContent='翻到背面 ↻'; $('readable-story').textContent='双击放大';
   $('story-flip').querySelector('.story-front').setAttribute('aria-hidden','false');$('story-flip').querySelector('.story-back').setAttribute('aria-hidden','true');
   $('detail-form').querySelectorAll('input,select,textarea,button').forEach(el=>el.disabled=!!photo.trashed_at);
+  $('readable-story').disabled=true;
   $('set-folder-cover').disabled=!photo.album_id || !!photo.trashed_at;
 }
 function storyDirty() {
-  return $('detail').open && state.detail && ($('detail-story').value!==(state.detail.story||'') || $('detail-date').value!==(state.detail.taken_at||'').slice(0,10));
+  return $('detail').open && state.detail && ($('detail-story').value!==(state.detail.story||'') || $('detail-date').value!==(state.detail.taken_at||'').slice(0,10) || $('detail-name').value!==state.detail.name || $('detail-location').value!==state.detail.location || $('detail-favorite').checked!==state.detail.favorite || $('detail-album').value!==(state.detail.album_id||'') || (typeof detailTagItems!=='undefined'&&JSON.stringify(detailTagItems)!==JSON.stringify(state.detail.tags.map(t=>({name:t.name,color:t.color||'#cfb58f'})))) || $('detail-latitude').value!==String(state.detail.latitude??'') || $('detail-longitude').value!==String(state.detail.longitude??''));
 }
-function closeStoryDetail() {if(storyDirty()&&!confirm('故事或日期尚未保存，确定放弃修改？'))return; $('detail').close();}
+function closeStoryDetail() {if(storyDirty()&&!confirm('照片资料尚未保存，确定放弃修改？'))return; $('detail').close();}
 $('detail').addEventListener('cancel',event=>{if(storyDirty()){event.preventDefault();closeStoryDetail();}});
 window.addEventListener('beforeunload',event=>{if(storyDirty()){event.preventDefault();event.returnValue='';}});
 $('detail-story').oninput=()=>{$('story-handwriting').textContent=$('detail-story').value||'这一页，还等着你落笔。';};
 $('detail-date').oninput=()=>{$('story-date').textContent=$('detail-date').value||(state.detail.created_at||'').slice(0,10);};
-$('flip-story').onclick=()=>{const back=$('story-flip').classList.toggle('flipped');$('flip-story').textContent=back?'回到照片 ↻':'翻到背面 ↻';$('story-flip').querySelector('.story-front').setAttribute('aria-hidden',String(back));$('story-flip').querySelector('.story-back').setAttribute('aria-hidden',String(!back));};
+$('flip-story').onclick=()=>{const back=$('story-flip').classList.toggle('flipped');$('flip-story').textContent=back?'回到照片 ↻':'翻到背面 ↻';$('readable-story').disabled=!back;$('readable-story').textContent=back?'清晰阅读':'双击放大';$('story-flip').querySelector('.story-front').setAttribute('aria-hidden',String(back));$('story-flip').querySelector('.story-back').setAttribute('aria-hidden',String(!back));};
 $('readable-story').onclick=()=>{const readable=$('story-handwriting').classList.toggle('readable');$('readable-story').textContent=readable?'手写阅读':'清晰阅读';if(!$('story-flip').classList.contains('flipped'))$('flip-story').click();};
 $('set-folder-cover').onclick=guard(async()=>{await api('/albums/'+state.detail.album_id,json('PATCH',{cover_id:state.detail.id}));await refreshOptions();notice('已设为影集封面');});
 async function drawMemory() {

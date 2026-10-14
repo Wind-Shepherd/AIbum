@@ -13,7 +13,7 @@ $alreadyListening = Test-NetConnection -ComputerName 127.0.0.1 -Port $Port -Info
 if ($alreadyListening) {
     try {
         $page = Invoke-WebRequest -Uri "http://127.0.0.1:$Port/" -TimeoutSec 3
-        if ($page.Content -match '<title>AIbum · 智慧相册</title>') {
+        if ($page.Content -match '<title>AIbum · (智慧|拾光)相册</title>') {
             Write-Host "AIbum is already running at http://127.0.0.1:$Port/"
             return
         }
